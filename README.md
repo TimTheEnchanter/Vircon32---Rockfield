@@ -12,6 +12,15 @@
 | X | Hyperspace |
 | Start | Start game / pause |
 
+## Saving the high score
+
+Insert a memory card and Rockfield saves its high score when a game ends with a new record. The title screen shows the card's status.
+
+- A blank card is claimed with the signature `ROCKFIELD VECTOR V1 `.
+- A card that already belongs to another game is never written to.
+- The save is three words right after the signature: a format version, the score, and a checksum. A damaged save is ignored and the default of 5000 is used instead.
+- A card inserted while the title screen is showing is picked up straight away. If it holds a higher score than the current one, that score is used.
+
 ## Files
 
 - `vector.h`: the vector graphics library. Its API is documented at the top of the file.

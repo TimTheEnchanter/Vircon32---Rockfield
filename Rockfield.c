@@ -14,6 +14,7 @@
 #include "input.h"
 #include "audio.h"
 #include "misc.h"
+#include "memcard.h"
 #include "vector.h"
 
 // -----------------------------------------------------------------------------
@@ -156,7 +157,8 @@ int frame = 0;
 bool paused = false;
 
 int score;
-int high_score = 5000;
+#define DEFAULT_HIGH_SCORE 5000
+int high_score = DEFAULT_HIGH_SCORE;
 bool new_high_score;
 int lives;
 int level;
@@ -185,6 +187,91 @@ void add_flash( float amount, int color )
         flash = amount;
         flash_color = color;
     }
+}
+
+
+// -----------------------------------------------------------------------------
+//   MEMORY CARD SAVE
+// -----------------------------------------------------------------------------
+//   Card layout: words 0-19 hold the game signature (written by every
+//   Vircon32 game that saves), then our 3-word record at word 20:
+//   [ format version, high score, checksum ].
+//   A card belonging to another game is never written to.
+
+#define CARD_NONE      0     // no card inserted
+#define CARD_OURS      1     // has a Rockfield save
+#define CARD_EMPTY     2     // blank card, we can claim it
+#define CARD_OTHER     3     // used by a different game: hands off
+
+#define SAVE_OFFSET    20
+#define SAVE_VERSION   1
+#define SAVE_KEY       0x5F3A9C17
+
+int* save_signature_text = "ROCKFIELD VECTOR V1 ";   // exactly 20 characters
+int card_state = CARD_NONE;
+bool card_loaded = false;      // loaded the card currently inserted
+int save_message = 0;          // what to tell the player at game over
+int[ 3 ] save_record;
+
+#define SAVE_MSG_NONE      0
+#define SAVE_MSG_SAVED     1
+#define SAVE_MSG_NO_CARD   2
+#define SAVE_MSG_OTHER     3
+
+int save_checksum( int version, int value )
+{
+    return ( version * 31 + value ) ^ SAVE_KEY;
+}
+
+// checks what card (if any) is inserted; loads our save the first
+// time we see it, keeping whichever high score is higher
+void refresh_card()
+{
+    if( !card_is_connected() )
+    {
+        card_state = CARD_NONE;
+        card_loaded = false;
+        return;
+    }
+
+    if( card_signature_matches( (game_signature*)save_signature_text ) )
+      card_state = CARD_OURS;
+    else if( card_is_empty() )
+      card_state = CARD_EMPTY;
+    else
+      card_state = CARD_OTHER;
+
+    if( card_state == CARD_OURS && !card_loaded )
+    {
+        card_read_data( save_record, SAVE_OFFSET, 3 );
+
+        if( save_record[ 0 ] == SAVE_VERSION
+            && save_record[ 2 ] == save_checksum( save_record[ 0 ], save_record[ 1 ] )
+            && save_record[ 1 ] > high_score )
+          high_score = save_record[ 1 ];
+    }
+
+    card_loaded = ( card_state != CARD_NONE );
+}
+
+// writes the high score; returns one of the SAVE_MSG values
+int save_high_score()
+{
+    refresh_card();
+
+    if( card_state == CARD_NONE ) return SAVE_MSG_NO_CARD;
+    if( card_state == CARD_OTHER ) return SAVE_MSG_OTHER;
+
+    if( card_state == CARD_EMPTY )
+      card_write_signature( (game_signature*)save_signature_text );
+
+    save_record[ 0 ] = SAVE_VERSION;
+    save_record[ 1 ] = high_score;
+    save_record[ 2 ] = save_checksum( SAVE_VERSION, high_score );
+    card_write_data( save_record, SAVE_OFFSET, 3 );
+
+    card_state = CARD_OURS;
+    return SAVE_MSG_SAVED;
 }
 
 // -----------------------------------------------------------------------------
@@ -1110,6 +1197,8 @@ void update_playing()
     if( lives <= 0 && !ship_alive && ship_respawn_timer < 40 )
     {
         if( saucer_active ) remove_saucer();
+        save_message = SAVE_MSG_NONE;
+        if( new_high_score ) save_message = save_high_score();
         enter_state( STATE_GAMEOVER );
     }
 }
@@ -1385,6 +1474,14 @@ void draw_title()
     vec_text( "HIGH SCORE", 230, 320, 6 );
     vec_number( high_score, 230 + vec_text_width( "HIGH SCORE ", 6 ), 320, 6 );
 
+    // memory card status
+    vec_thickness( 1.2 );
+    vec_color( 0xFF907070, 0 );
+    if( card_state == CARD_OURS )       vec_text_centered( "HIGH SCORE SAVED ON MEMORY CARD", 320, 342, 4.2 );
+    else if( card_state == CARD_EMPTY ) vec_text_centered( "MEMORY CARD READY", 320, 342, 4.2 );
+    else if( card_state == CARD_OTHER ) vec_text_centered( "MEMORY CARD HAS ANOTHER GAME - NOT SAVING", 320, 342, 4.2 );
+    else                                vec_text_centered( "NO MEMORY CARD - HIGH SCORE WILL NOT BE SAVED", 320, 342, 4.2 );
+
     vec_intensity( 1 );
 }
 
@@ -1404,6 +1501,15 @@ void draw_game_over()
     {
         vec_color( 0xFF60FFFF, 0xFF205050 );
         vec_text_centered( "NEW HIGH SCORE", 320, 185, 8 );
+    }
+
+    if( save_message != SAVE_MSG_NONE )
+    {
+        vec_thickness( 1.5 );
+        vec_color( 0xFFC0A0A0, 0 );
+        if( save_message == SAVE_MSG_SAVED )        vec_text_centered( "SAVED TO MEMORY CARD", 320, 262, 5 );
+        else if( save_message == SAVE_MSG_NO_CARD ) vec_text_centered( "NO MEMORY CARD - NOT SAVED", 320, 262, 5 );
+        else                                        vec_text_centered( "CARD HAS ANOTHER GAME - NOT SAVED", 320, 262, 5 );
     }
 
     if( state_timer > 90 && ( frame / 30 ) % 2 == 0 )
@@ -1444,6 +1550,7 @@ void main()
         star_phase[ i ] = frand() * 6.2831853;
     }
 
+    refresh_card();
     enter_title();
 
     while( true )
@@ -1451,6 +1558,8 @@ void main()
         // --- update ---
         if( state == STATE_TITLE )
         {
+            // notices cards being inserted or swapped on the title screen
+            refresh_card();
             update_world();
             if( gamepad_button_start() == 1 && state_timer > 20 ) new_game();
         }
