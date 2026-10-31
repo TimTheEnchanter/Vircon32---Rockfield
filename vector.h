@@ -1,0 +1,413 @@
+// =============================================================================
+//   vector.h - glowing vector graphics for Vircon32
+// =============================================================================
+//
+//   Vircon32's GPU can only draw rectangular texture regions (optionally
+//   scaled and rotated). This library draws lines by taking a 1-pixel-wide
+//   strip of a texture, stretching it to the line's length and rotating it
+//   to the line's angle. Each line is drawn twice: a soft, wide halo with
+//   additive blending ("glow") and a thin, sharp line on top ("core").
+//
+//   REQUIREMENTS
+//     - Put vector_lines.png (converted to .vtex) in your ROM's textures.
+//     - Call vec_init( texture_id, first_region ) once at startup.
+//       The library uses 3 regions: first_region .. first_region + 2.
+//
+//   FRAME USAGE
+//     Line functions only queue lines. Call vec_flush() once per frame,
+//     after queueing everything: it draws all glows first and then all
+//     cores, so halos never wash over the sharp lines.
+//     vec_fill_convex() draws immediately (call it before vec_flush()
+//     to keep fills underneath your lines).
+//
+//   API SUMMARY
+//     vec_init( texture, first_region )
+//     vec_color( core_color, glow_color )      glow_color 0 = no glow
+//     vec_thickness( pixels )                  core line width
+//     vec_glow_size( pixels )                  halo width
+//     vec_line( x1, y1, x2, y2 )
+//     vec_polyline( xs, ys, count, closed )
+//     vec_shape( xs, ys, count, x, y, angle, scale )   transformed, closed
+//     vec_circle( x, y, radius, segments )
+//     vec_text( text, x, y, size )             built-in vector font
+//     vec_number( value, x, y, size )
+//     vec_text_width( text, size )
+//     vec_fill_convex( xs, ys, count, color )  software scanline fill
+//     vec_flush()
+//     vec_queued_lines()                       lines queued this frame
+//
+//   Colors use the usual Vircon32 format, e.g. make_color_rgb( r, g, b ).
+//   A good glow color is a darker version of the core color, since the
+//   glow is added on top of whatever is behind it.
+// =============================================================================
+
+#ifndef VECTOR_H
+#define VECTOR_H
+
+#include "video.h"
+#include "math.h"
+
+// maximum number of lines that can be queued in one frame
+#ifndef VEC_MAX_LINES
+  #define VEC_MAX_LINES 700
+#endif
+
+// maximum points accepted by vec_shape / vec_circle
+#define VEC_MAX_POINTS 64
+
+// -----------------------------------------------------------------------------
+//   INTERNAL STATE
+// -----------------------------------------------------------------------------
+
+int vec_texture_id = 0;
+int vec_region_core = 0;
+int vec_region_glow = 1;
+int vec_region_pixel = 2;
+
+int vec_current_core = 0xFFFFFFFF;
+int vec_current_glow = 0;
+float vec_current_thickness = 2.0;
+float vec_current_glow_size = 14.0;
+
+float[ VEC_MAX_LINES ] vec_q_x1;
+float[ VEC_MAX_LINES ] vec_q_y1;
+float[ VEC_MAX_LINES ] vec_q_length;
+float[ VEC_MAX_LINES ] vec_q_angle;
+float[ VEC_MAX_LINES ] vec_q_thickness;
+float[ VEC_MAX_LINES ] vec_q_glow_size;
+int[ VEC_MAX_LINES ] vec_q_core;
+int[ VEC_MAX_LINES ] vec_q_glow;
+int vec_q_count = 0;
+
+float[ VEC_MAX_POINTS ] vec_tmp_x;
+float[ VEC_MAX_POINTS ] vec_tmp_y;
+
+// -----------------------------------------------------------------------------
+//   SETUP
+// -----------------------------------------------------------------------------
+
+// texture layout expected (from vector_lines.png):
+//   x = 0, y = 0..3   solid white strip  (line core)
+//   x = 2, y = 0..31  gaussian strip     (line glow)
+void vec_init( int texture_id, int first_region )
+{
+    int previous_texture = get_selected_texture();
+
+    vec_texture_id = texture_id;
+    vec_region_core = first_region;
+    vec_region_glow = first_region + 1;
+    vec_region_pixel = first_region + 2;
+
+    select_texture( texture_id );
+    select_region( vec_region_core );
+    define_region( 0, 0, 0, 3,  0, 2 );
+    select_region( vec_region_glow );
+    define_region( 2, 0, 2, 31,  2, 16 );
+    select_region( vec_region_pixel );
+    define_region( 0, 0, 0, 0,  0, 0 );
+
+    select_texture( previous_texture );
+    vec_q_count = 0;
+}
+
+void vec_color( int core_color, int glow_color )
+{
+    vec_current_core = core_color;
+    vec_current_glow = glow_color;
+}
+
+void vec_thickness( float pixels )
+{
+    vec_current_thickness = pixels;
+}
+
+void vec_glow_size( float pixels )
+{
+    vec_current_glow_size = pixels;
+}
+
+int vec_queued_lines()
+{
+    return vec_q_count;
+}
+
+// -----------------------------------------------------------------------------
+//   LINES
+// -----------------------------------------------------------------------------
+
+void vec_line( float x1, float y1, float x2, float y2 )
+{
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    int i;
+
+    if( vec_q_count >= VEC_MAX_LINES )
+      return;
+
+    i = vec_q_count;
+    vec_q_x1[ i ] = x1;
+    vec_q_y1[ i ] = y1;
+    vec_q_length[ i ] = sqrt( dx*dx + dy*dy ) + 1.0;
+    vec_q_angle[ i ] = atan2( dy, dx );
+    vec_q_thickness[ i ] = vec_current_thickness;
+    vec_q_glow_size[ i ] = vec_current_glow_size;
+    vec_q_core[ i ] = vec_current_core;
+    vec_q_glow[ i ] = vec_current_glow;
+    vec_q_count++;
+}
+
+void vec_polyline( float* xs, float* ys, int count, bool closed )
+{
+    int i;
+
+    for( i = 0; i < count - 1; i++ )
+      vec_line( xs[ i ], ys[ i ], xs[ i + 1 ], ys[ i + 1 ] );
+
+    if( closed && count > 2 )
+      vec_line( xs[ count - 1 ], ys[ count - 1 ], xs[ 0 ], ys[ 0 ] );
+}
+
+// draws a closed shape given in model coordinates, rotated by
+// angle (radians, clockwise), scaled and placed at ( x, y )
+void vec_shape( float* xs, float* ys, int count, float x, float y, float angle, float scale )
+{
+    float c = cos( angle ) * scale;
+    float s = sin( angle ) * scale;
+    int i;
+
+    if( count > VEC_MAX_POINTS )
+      count = VEC_MAX_POINTS;
+
+    for( i = 0; i < count; i++ )
+    {
+        vec_tmp_x[ i ] = x + xs[ i ] * c - ys[ i ] * s;
+        vec_tmp_y[ i ] = y + xs[ i ] * s + ys[ i ] * c;
+    }
+
+    vec_polyline( vec_tmp_x, vec_tmp_y, count, true );
+}
+
+void vec_circle( float x, float y, float radius, int segments )
+{
+    float step;
+    int i;
+
+    if( segments > VEC_MAX_POINTS ) segments = VEC_MAX_POINTS;
+    if( segments < 3 ) segments = 3;
+    step = 6.2831853 / segments;
+
+    for( i = 0; i < segments; i++ )
+    {
+        vec_tmp_x[ i ] = x + radius * cos( i * step );
+        vec_tmp_y[ i ] = y + radius * sin( i * step );
+    }
+
+    vec_polyline( vec_tmp_x, vec_tmp_y, segments, true );
+}
+
+// -----------------------------------------------------------------------------
+//   DRAWING THE QUEUE
+// -----------------------------------------------------------------------------
+
+void vec_flush()
+{
+    int i;
+    int previous_texture = get_selected_texture();
+
+    select_texture( vec_texture_id );
+
+    // pass 1: halos, added together
+    set_blending_mode( blending_add );
+    select_region( vec_region_glow );
+
+    for( i = 0; i < vec_q_count; i++ )
+      if( vec_q_glow[ i ] )
+      {
+          set_multiply_color( vec_q_glow[ i ] );
+          set_drawing_scale( vec_q_length[ i ], vec_q_glow_size[ i ] / 32.0 );
+          set_drawing_angle( vec_q_angle[ i ] );
+          draw_region_rotozoomed_at( vec_q_x1[ i ], vec_q_y1[ i ] );
+      }
+
+    // pass 2: sharp lines on top
+    set_blending_mode( blending_alpha );
+    select_region( vec_region_core );
+
+    for( i = 0; i < vec_q_count; i++ )
+    {
+        set_multiply_color( vec_q_core[ i ] );
+        set_drawing_scale( vec_q_length[ i ], vec_q_thickness[ i ] / 4.0 );
+        set_drawing_angle( vec_q_angle[ i ] );
+        draw_region_rotozoomed_at( vec_q_x1[ i ], vec_q_y1[ i ] );
+    }
+
+    // leave GPU in a neutral state for other drawing code
+    set_multiply_color( color_white );
+    set_drawing_scale( 1, 1 );
+    set_drawing_angle( 0 );
+    select_texture( previous_texture );
+
+    vec_q_count = 0;
+}
+
+// -----------------------------------------------------------------------------
+//   FILLED CONVEX POLYGONS (drawn immediately, one span per scanline)
+// -----------------------------------------------------------------------------
+
+void vec_fill_convex( float* xs, float* ys, int count, int color )
+{
+    float min_y = 100000, max_y = -100000;
+    float span_min, span_max, t, xi, ya, yb;
+    int y, i, j, y_start, y_end;
+    int previous_texture = get_selected_texture();
+
+    for( i = 0; i < count; i++ )
+    {
+        min_y = fmin( min_y, ys[ i ] );
+        max_y = fmax( max_y, ys[ i ] );
+    }
+
+    y_start = max( 0, ceil( min_y ) );
+    y_end = min( screen_height - 1, floor( max_y ) );
+
+    select_texture( vec_texture_id );
+    select_region( vec_region_pixel );
+    set_multiply_color( color );
+    set_blending_mode( blending_alpha );
+    set_drawing_angle( 0 );
+
+    for( y = y_start; y <= y_end; y++ )
+    {
+        span_min = 100000;
+        span_max = -100000;
+
+        for( i = 0; i < count; i++ )
+        {
+            j = i + 1;
+            if( j == count ) j = 0;
+            ya = ys[ i ];
+            yb = ys[ j ];
+
+            if( ( y >= ya && y < yb ) || ( y >= yb && y < ya ) )
+            {
+                t = ( y - ya ) / ( yb - ya );
+                xi = xs[ i ] + t * ( xs[ j ] - xs[ i ] );
+                span_min = fmin( span_min, xi );
+                span_max = fmax( span_max, xi );
+            }
+        }
+
+        if( span_max > span_min )
+        {
+            set_drawing_scale( span_max - span_min + 1.0, 1.0 );
+            draw_region_zoomed_at( span_min, y );
+        }
+    }
+
+    set_multiply_color( color_white );
+    set_drawing_scale( 1, 1 );
+    select_texture( previous_texture );
+}
+
+// -----------------------------------------------------------------------------
+//   VECTOR FONT (16-segment style)
+// -----------------------------------------------------------------------------
+//
+//   Character cell is 1 wide x 2 tall (times size). Segment endpoints are
+//   given on a 3x3 grid of points:   0 1 2  (top)
+//                                    3 4 5  (middle)
+//                                    6 7 8  (bottom)
+
+int[ 16 ] vec_seg_a = { 0, 2, 5, 6, 3, 0, 3, 4, 0, 1, 2, 4, 4, 4, 3, 5 };
+int[ 16 ] vec_seg_b = { 2, 5, 8, 8, 6, 3, 4, 5, 4, 4, 4, 6, 7, 8, 7, 7 };
+
+// segment bitmasks for '0'-'9' then 'A'-'Z'
+int[ 36 ] vec_font =
+{
+    0x0C3F, 0x1200, 0x00DB, 0x008F, 0x00E6, 0x00ED, 0x00FD, 0x0007, 0x00FF, 0x00EF,   // 0-9
+    0x00F7, 0x128F, 0x0039, 0x120F, 0x0079, 0x0071, 0x00BD, 0x00F6, 0x1209, 0x001E,   // A-J
+    0x2470, 0x0038, 0x0536, 0x2136, 0x003F, 0x00F3, 0x203F, 0x20F3, 0x00ED, 0x1201,   // K-T
+    0x003E, 0xC022, 0x2836, 0x2D00, 0x1500, 0x0C09                                    // U-Z
+};
+
+void vec_char( int c, float x, float y, float size )
+{
+    int mask = 0;
+    int s;
+    float ax, ay, bx, by;
+
+    if( c >= 'a' && c <= 'z' ) c = c - 'a' + 'A';
+
+    if( c >= '0' && c <= '9' )      mask = vec_font[ c - '0' ];
+    else if( c >= 'A' && c <= 'Z' ) mask = vec_font[ c - 'A' + 10 ];
+    else if( c == '-' )             mask = 0x00C0;
+    else if( c == '+' )             mask = 0x12C0;
+    else if( c == '/' )             mask = 0x0C00;
+    else if( c == '.' || c == ':' )
+    {
+        // small dots
+        if( c == ':' ) vec_line( x + 0.5 * size, y + 0.5 * size, x + 0.5 * size, y + 0.6 * size );
+        vec_line( x + 0.5 * size, y + 1.85 * size, x + 0.5 * size, y + 2.0 * size );
+        return;
+    }
+
+    for( s = 0; s < 16; s++ )
+      if( mask & ( 1 << s ) )
+      {
+          ax = x + ( vec_seg_a[ s ] % 3 ) * 0.5 * size;
+          ay = y + ( vec_seg_a[ s ] / 3 ) * size;
+          bx = x + ( vec_seg_b[ s ] % 3 ) * 0.5 * size;
+          by = y + ( vec_seg_b[ s ] / 3 ) * size;
+          vec_line( ax, ay, bx, by );
+      }
+}
+
+// width in pixels of a text drawn with vec_text
+float vec_text_width( int* text, float size )
+{
+    int n = 0;
+    while( text[ n ] ) n++;
+    if( n == 0 ) return 0;
+    return ( n * 1.6 - 0.6 ) * size;
+}
+
+// draws text with its top-left corner at ( x, y );
+// the cell is size wide and 2 * size tall
+void vec_text( int* text, float x, float y, float size )
+{
+    while( *text )
+    {
+        vec_char( *text, x, y, size );
+        x += 1.6 * size;
+        text++;
+    }
+}
+
+void vec_number( int value, float x, float y, float size )
+{
+    int[ 12 ] digits;
+    int n = 0, i;
+
+    if( value < 0 )
+    {
+        vec_char( '-', x, y, size );
+        x += 1.6 * size;
+        value = -value;
+    }
+
+    do
+    {
+        digits[ n ] = '0' + value % 10;
+        value /= 10;
+        n++;
+    }
+    while( value > 0 );
+
+    for( i = n - 1; i >= 0; i-- )
+    {
+        vec_char( digits[ i ], x, y, size );
+        x += 1.6 * size;
+    }
+}
+
+#endif
