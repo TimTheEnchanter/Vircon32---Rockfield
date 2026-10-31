@@ -28,11 +28,18 @@
 //     vec_line( x1, y1, x2, y2 )
 //     vec_polyline( xs, ys, count, closed )
 //     vec_shape( xs, ys, count, x, y, angle, scale )   transformed, closed
+//     vec_shape_wrapped( ..., radius )         also draws screen-wrap copies
+//     vec_arc( x, y, radius, start, end, segments )
+//     vec_dashed_line( x1, y1, x2, y2, dash, gap )
 //     vec_circle( x, y, radius, segments )
 //     vec_text( text, x, y, size )             built-in vector font
 //     vec_number( value, x, y, size )
 //     vec_text_width( text, size )
+//     vec_text_centered( text, center_x, y, size )
+//     vec_intensity( f )                       global fade, 0..1
+//     vec_offset( x, y )                       camera offset / screen shake
 //     vec_fill_convex( xs, ys, count, color )  software scanline fill
+//     vec_fill_rect( x, y, w, h, color, blend ) solid / additive rectangle
 //     vec_flush()
 //     vec_queued_lines()                       lines queued this frame
 //
@@ -66,6 +73,11 @@ int vec_region_pixel = 2;
 
 int vec_current_core = 0xFFFFFFFF;
 int vec_current_glow = 0;
+int vec_base_core = 0xFFFFFFFF;
+int vec_base_glow = 0;
+float vec_current_intensity = 1.0;
+float vec_offset_x = 0;
+float vec_offset_y = 0;
 float vec_current_thickness = 2.0;
 float vec_current_glow_size = 14.0;
 
@@ -110,10 +122,60 @@ void vec_init( int texture_id, int first_region )
     vec_q_count = 0;
 }
 
+// multiplies a color's alpha (for line cores: fades them out)
+int vec_scale_alpha( int color, float f )
+{
+    return make_color_rgba( get_color_red( color ), get_color_green( color ),
+                            get_color_blue( color ), get_color_alpha( color ) * f );
+}
+
+// multiplies a color's RGB (for additive glows: dims them)
+int vec_scale_rgb( int color, float f )
+{
+    return make_color_rgba( get_color_red( color ) * f, get_color_green( color ) * f,
+                            get_color_blue( color ) * f, get_color_alpha( color ) );
+}
+
+void vec_update_colors()
+{
+    if( vec_current_intensity >= 1.0 )
+    {
+        vec_current_core = vec_base_core;
+        vec_current_glow = vec_base_glow;
+        return;
+    }
+
+    vec_current_core = vec_scale_alpha( vec_base_core, vec_current_intensity );
+
+    if( vec_base_glow )
+      vec_current_glow = vec_scale_rgb( vec_base_glow, vec_current_intensity );
+    else
+      vec_current_glow = 0;
+}
+
 void vec_color( int core_color, int glow_color )
 {
-    vec_current_core = core_color;
-    vec_current_glow = glow_color;
+    vec_base_core = core_color;
+    vec_base_glow = glow_color;
+    vec_update_colors();
+}
+
+// global brightness for everything queued from now on (0 = invisible,
+// 1 = normal); useful for fades, blinking and title transitions
+void vec_intensity( float f )
+{
+    if( f < 0 ) f = 0;
+    if( f > 1 ) f = 1;
+    vec_current_intensity = f;
+    vec_update_colors();
+}
+
+// displacement added to everything queued from now on; set it
+// to a small random amount for screen shake, back to 0 for HUDs
+void vec_offset( float x, float y )
+{
+    vec_offset_x = x;
+    vec_offset_y = y;
 }
 
 void vec_thickness( float pixels )
@@ -144,9 +206,12 @@ void vec_line( float x1, float y1, float x2, float y2 )
     if( vec_q_count >= VEC_MAX_LINES )
       return;
 
+    if( vec_current_intensity <= 0 )
+      return;
+
     i = vec_q_count;
-    vec_q_x1[ i ] = x1;
-    vec_q_y1[ i ] = y1;
+    vec_q_x1[ i ] = x1 + vec_offset_x;
+    vec_q_y1[ i ] = y1 + vec_offset_y;
     vec_q_length[ i ] = sqrt( dx*dx + dy*dy ) + 1.0;
     vec_q_angle[ i ] = atan2( dy, dx );
     vec_q_thickness[ i ] = vec_current_thickness;
@@ -203,6 +268,63 @@ void vec_circle( float x, float y, float radius, int segments )
     }
 
     vec_polyline( vec_tmp_x, vec_tmp_y, segments, true );
+}
+
+// same as vec_shape, but also draws the copies that peek in from the
+// opposite edges when the shape overlaps a screen border (for objects
+// that wrap around the screen); radius is the shape's bounding radius
+void vec_shape_wrapped( float* xs, float* ys, int count, float x, float y,
+                        float angle, float scale, float radius )
+{
+    float wx = 0, wy = 0;
+
+    vec_shape( xs, ys, count, x, y, angle, scale );
+
+    if( x < radius ) wx = screen_width;
+    if( x > screen_width - radius ) wx = -screen_width;
+    if( y < radius ) wy = screen_height;
+    if( y > screen_height - radius ) wy = -screen_height;
+
+    if( wx != 0 ) vec_shape( xs, ys, count, x + wx, y, angle, scale );
+    if( wy != 0 ) vec_shape( xs, ys, count, x, y + wy, angle, scale );
+    if( wx != 0 && wy != 0 ) vec_shape( xs, ys, count, x + wx, y + wy, angle, scale );
+}
+
+// arc from angle_start to angle_end (radians, clockwise)
+void vec_arc( float x, float y, float radius, float angle_start, float angle_end, int segments )
+{
+    float step, a1, a2;
+    int i;
+
+    if( segments < 1 ) segments = 1;
+    step = ( angle_end - angle_start ) / segments;
+
+    for( i = 0; i < segments; i++ )
+    {
+        a1 = angle_start + i * step;
+        a2 = a1 + step;
+        vec_line( x + radius * cos( a1 ), y + radius * sin( a1 ),
+                  x + radius * cos( a2 ), y + radius * sin( a2 ) );
+    }
+}
+
+void vec_dashed_line( float x1, float y1, float x2, float y2, float dash, float gap )
+{
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float length = sqrt( dx*dx + dy*dy );
+    float ux, uy, pos = 0, end;
+
+    if( length < 0.5 ) return;
+    ux = dx / length;
+    uy = dy / length;
+
+    while( pos < length )
+    {
+        end = fmin( pos + dash, length );
+        vec_line( x1 + ux * pos, y1 + uy * pos, x1 + ux * end, y1 + uy * end );
+        pos = end + gap;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -300,7 +422,7 @@ void vec_fill_convex( float* xs, float* ys, int count, int color )
         if( span_max > span_min )
         {
             set_drawing_scale( span_max - span_min + 1.0, 1.0 );
-            draw_region_zoomed_at( span_min, y );
+            draw_region_zoomed_at( span_min + vec_offset_x, y + vec_offset_y );
         }
     }
 
@@ -309,8 +431,28 @@ void vec_fill_convex( float* xs, float* ys, int count, int color )
     select_texture( previous_texture );
 }
 
+// solid rectangle drawn immediately; blend_mode is blending_alpha
+// (normal) or blending_add (e.g. a full-screen flash)
+void vec_fill_rect( float x, float y, float w, float h, int color, int blend_mode )
+{
+    int previous_texture = get_selected_texture();
+
+    select_texture( vec_texture_id );
+    select_region( vec_region_pixel );
+    set_multiply_color( color );
+    set_blending_mode( blend_mode );
+    set_drawing_angle( 0 );
+    set_drawing_scale( w, h );
+    draw_region_zoomed_at( x, y );
+
+    set_blending_mode( blending_alpha );
+    set_multiply_color( color_white );
+    set_drawing_scale( 1, 1 );
+    select_texture( previous_texture );
+}
+
 // -----------------------------------------------------------------------------
-//   VECTOR FONT (16-segment style)
+//   VECTOR FONT (16-segment style, plus 4 extra segments)
 // -----------------------------------------------------------------------------
 //
 //   Character cell is 1 wide x 2 tall (times size). Segment endpoints are
@@ -318,14 +460,16 @@ void vec_fill_convex( float* xs, float* ys, int count, int color )
 //                                    3 4 5  (middle)
 //                                    6 7 8  (bottom)
 
-int[ 16 ] vec_seg_a = { 0, 2, 5, 6, 3, 0, 3, 4, 0, 1, 2, 4, 4, 4, 3, 5 };
-int[ 16 ] vec_seg_b = { 2, 5, 8, 8, 6, 3, 4, 5, 4, 4, 4, 6, 7, 8, 7, 7 };
+// segments 0-15 are the classic set; 16-19 (half top, half bottom and two
+// diagonals into the middle right) give B and D their rounded shapes
+int[ 20 ] vec_seg_a = { 0, 2, 5, 6, 3, 0, 3, 4, 0, 1, 2, 4, 4, 4, 3, 5, 0, 6, 1, 7 };
+int[ 20 ] vec_seg_b = { 2, 5, 8, 8, 6, 3, 4, 5, 4, 4, 4, 6, 7, 8, 7, 7, 1, 7, 5, 5 };
 
 // segment bitmasks for '0'-'9' then 'A'-'Z'
 int[ 36 ] vec_font =
 {
     0x0C3F, 0x1200, 0x00DB, 0x008F, 0x00E6, 0x00ED, 0x00FD, 0x0007, 0x00FF, 0x00EF,   // 0-9
-    0x00F7, 0x128F, 0x0039, 0x120F, 0x0079, 0x0071, 0x00BD, 0x00F6, 0x1209, 0x001E,   // A-J
+    0x00F7, 0xF00F0, 0x0039, 0xF0030, 0x0079, 0x0071, 0x00BD, 0x00F6, 0x1209, 0x001E,   // A-J
     0x2470, 0x0038, 0x0536, 0x2136, 0x003F, 0x00F3, 0x203F, 0x20F3, 0x00ED, 0x1201,   // K-T
     0x003E, 0xC022, 0x2836, 0x2D00, 0x1500, 0x0C09                                    // U-Z
 };
@@ -351,7 +495,7 @@ void vec_char( int c, float x, float y, float size )
         return;
     }
 
-    for( s = 0; s < 16; s++ )
+    for( s = 0; s < 20; s++ )
       if( mask & ( 1 << s ) )
       {
           ax = x + ( vec_seg_a[ s ] % 3 ) * 0.5 * size;
@@ -381,6 +525,12 @@ void vec_text( int* text, float x, float y, float size )
         x += 1.6 * size;
         text++;
     }
+}
+
+// text horizontally centered on center_x
+void vec_text_centered( int* text, float center_x, float y, float size )
+{
+    vec_text( text, center_x - vec_text_width( text, size ) / 2, y, size );
 }
 
 void vec_number( int value, float x, float y, float size )

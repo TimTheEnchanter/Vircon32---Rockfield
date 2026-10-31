@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rom-definition version="1.0">
+    <rom type="cartridge" title="Rockfield" version="1.1" />
+    <binary path="obj/Rockfield.vbin" />
+    <textures>
+        <texture path="vector_lines.vtex" />
+    </textures>
+    <sounds>
+        <sound path="sounds/fire.vsnd" />
+        <sound path="sounds/bang_large.vsnd" />
+        <sound path="sounds/bang_medium.vsnd" />
+        <sound path="sounds/bang_small.vsnd" />
+        <sound path="sounds/ship_explode.vsnd" />
+        <sound path="sounds/thrust.vsnd" />
+        <sound path="sounds/saucer_big.vsnd" />
+        <sound path="sounds/saucer_small.vsnd" />
+        <sound path="sounds/saucer_fire.vsnd" />
+        <sound path="sounds/extra_life.vsnd" />
+        <sound path="sounds/beat_low.vsnd" />
+        <sound path="sounds/beat_high.vsnd" />
+        <sound path="sounds/hyperspace.vsnd" />
+        <sound path="sounds/start_game.vsnd" />
+        <sound path="sounds/wave_clear.vsnd" />
+        <sound path="sounds/pause.vsnd" />
+    </sounds>
+</rom-definition>
