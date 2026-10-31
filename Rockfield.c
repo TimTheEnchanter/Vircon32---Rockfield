@@ -6,7 +6,7 @@
 //              Start         start / pause
 // =============================================================================
 
-#define VEC_MAX_LINES 900
+#define VEC_MAX_LINES 1300
 
 #include "video.h"
 #include "math.h"
@@ -125,9 +125,47 @@ void init_sounds()
 //   HELPERS
 // -----------------------------------------------------------------------------
 
+// Two independent generators (xorshift32), so recorded games replay exactly:
+//  - gameplay: reseeded at the start of every game; only game logic uses it
+//  - effects:  screen shake and flame flicker, which also run while paused
+int rng_state = 1;
+int fx_state = 1;
+
+int xorshift( int x )
+{
+    x = x ^ ( x << 13 );
+    x = x ^ ( ( x >> 17 ) & 0x7FFF );
+    x = x ^ ( x << 5 );
+    return x;
+}
+
+void gseed( int seed )
+{
+    if( seed == 0 ) seed = 1;
+    rng_state = seed;
+}
+
+// non-negative random integer for gameplay
+int grand()
+{
+    rng_state = xorshift( rng_state );
+    return rng_state & 0x7FFFFFFF;
+}
+
+int fxrand()
+{
+    fx_state = xorshift( fx_state );
+    return fx_state & 0x7FFFFFFF;
+}
+
+float fx_range( float a, float b )
+{
+    return a + ( b - a ) * ( ( fxrand() % 10000 ) / 10000.0 );
+}
+
 float frand()
 {
-    return ( rand() % 10000 ) / 10000.0;
+    return ( grand() % 10000 ) / 10000.0;
 }
 
 float frand_range( float a, float b )
@@ -150,10 +188,13 @@ float wrap( float v, float limit )
 #define STATE_TITLE     0
 #define STATE_PLAYING   1
 #define STATE_GAMEOVER  2
+#define STATE_DEMO      3     // attract mode: replaying a recorded game
+#define STATE_ENTRY     4     // entering initials for the high score table
 
 int state = STATE_TITLE;
 int state_timer = 0;
 int frame = 0;
+int anim = 0;           // animation clock: game-relative during play, so replays match
 bool paused = false;
 
 int score;
@@ -169,7 +210,164 @@ int next_wave_timer;
 int beat_timer;
 bool beat_high;
 
-// screen effects
+// title screen cycles through these pages, then plays the demo
+#define PAGE_LOGO    0
+#define PAGE_SCORES  1
+int title_page = PAGE_LOGO;
+int highlight_rank = -1;       // table row to highlight after entering initials
+
+// -----------------------------------------------------------------------------
+//   INPUT (live or replayed) AND RECORDING
+// -----------------------------------------------------------------------------
+//   Game logic never reads the gamepad directly: each logic frame gets a
+//   5-bit input word, either from the gamepad (and recorded) or from a
+//   recording (demo). With the same seed and inputs the game replays exactly.
+
+#define IN_LEFT    1
+#define IN_RIGHT   2
+#define IN_THRUST  4
+#define IN_FIRE    8
+#define IN_HYPER   16
+
+#define REC_MAX_FRAMES  3600      // 60 s of gameplay
+#define REC_WORDS       600       // 6 frames of 5 bits packed per word
+#define DEMO_MAX_PLAY   2700      // attract demo runs 45 s at most
+#define DEMO_MIN_FRAMES 600       // shorter games never become the demo
+
+int in_bits = 0;
+int fire_frames = 0;       // how long fire has been held (1 = just pressed)
+int hyper_frames = 0;
+int game_frame = 0;        // logic frames since the game started
+int game_seed = 1;
+
+int[ REC_WORDS ] rec_data;     // the game being played now
+int rec_frames = 0;
+
+bool demo_mode = false;
+int demo_pos = 0;
+int demo_seed = 0;             // the demo: best game recorded so far
+int demo_frames = 0;
+int demo_score = 0;
+int[ REC_WORDS ] demo_data;
+
+int read_gamepad_bits()
+{
+    int bits = 0;
+    if( gamepad_left() > 0 )  bits = bits | IN_LEFT;
+    if( gamepad_right() > 0 ) bits = bits | IN_RIGHT;
+    if( gamepad_up() > 0 || gamepad_button_a() > 0 ) bits = bits | IN_THRUST;
+    if( gamepad_button_b() > 0 ) bits = bits | IN_FIRE;
+    if( gamepad_button_x() > 0 ) bits = bits | IN_HYPER;
+    return bits;
+}
+
+void rec_add( int bits )
+{
+    if( rec_frames >= REC_MAX_FRAMES ) return;
+    rec_data[ rec_frames / 6 ] = rec_data[ rec_frames / 6 ] | ( bits << ( ( rec_frames % 6 ) * 5 ) );
+    rec_frames++;
+}
+
+int rec_get( int* data, int position )
+{
+    return ( data[ position / 6 ] >> ( ( position % 6 ) * 5 ) ) & 31;
+}
+
+void apply_input( int bits )
+{
+    in_bits = bits;
+
+    if( bits & IN_FIRE ) fire_frames++;
+    else fire_frames = 0;
+
+    if( bits & IN_HYPER ) hyper_frames++;
+    else hyper_frames = 0;
+}
+
+#include "demo_builtin.h"
+
+void load_builtin_demo()
+{
+    if( builtin_demo_frames <= 0 ) return;
+    memcpy( demo_data, builtin_demo_data, REC_WORDS );
+    demo_seed = builtin_demo_seed;
+    demo_frames = builtin_demo_frames;
+    demo_score = builtin_demo_score;
+}
+
+bool in_game()
+{
+    return state == STATE_PLAYING || state == STATE_DEMO;
+}
+
+// -----------------------------------------------------------------------------
+//   HIGH SCORE TABLE
+// -----------------------------------------------------------------------------
+
+#define HS_COUNT 5
+
+int[ HS_COUNT ] hs_score = { 5000, 4000, 3000, 2000, 1000 };
+int[ HS_COUNT ] hs_name;        // 3 characters packed, 8 bits each
+
+int pack_name( int* text )
+{
+    return text[ 0 ] | ( text[ 1 ] << 8 ) | ( text[ 2 ] << 16 );
+}
+
+void unpack_name( int name, int* text )
+{
+    text[ 0 ] = name & 255;
+    text[ 1 ] = ( name >> 8 ) & 255;
+    text[ 2 ] = ( name >> 16 ) & 255;
+    text[ 3 ] = 0;
+}
+
+void init_table()
+{
+    hs_name[ 0 ] = pack_name( "VEC" );
+    hs_name[ 1 ] = pack_name( "TOR" );
+    hs_name[ 2 ] = pack_name( "ROK" );
+    hs_name[ 3 ] = pack_name( "ZAP" );
+    hs_name[ 4 ] = pack_name( "UFO" );
+}
+
+// position a score would take in the table, or -1
+int table_rank( int value )
+{
+    int i;
+    for( i = 0; i < HS_COUNT; i++ )
+      if( value > hs_score[ i ] ) return i;
+    return -1;
+}
+
+void table_insert( int value, int name, int rank )
+{
+    int i;
+    if( rank < 0 || rank >= HS_COUNT ) return;
+
+    for( i = HS_COUNT - 1; i > rank; i-- )
+    {
+        hs_score[ i ] = hs_score[ i - 1 ];
+        hs_name[ i ] = hs_name[ i - 1 ];
+    }
+
+    hs_score[ rank ] = value;
+    hs_name[ rank ] = name;
+}
+
+// adds an entry unless the exact same one is already there
+void table_merge( int value, int name )
+{
+    int i;
+    for( i = 0; i < HS_COUNT; i++ )
+      if( hs_score[ i ] == value && hs_name[ i ] == name ) return;
+    table_insert( value, name, table_rank( value ) );
+}
+
+// -----------------------------------------------------------------------------
+//   SCREEN EFFECTS
+// -----------------------------------------------------------------------------
+
 float world_dim = 1.0;    // whole-world brightness (dimmed while paused)
 float shake = 0;
 float flash = 0;
@@ -193,9 +391,14 @@ void add_flash( float amount, int color )
 // -----------------------------------------------------------------------------
 //   MEMORY CARD SAVE
 // -----------------------------------------------------------------------------
-//   Card layout: words 0-19 hold the game signature (written by every
-//   Vircon32 game that saves), then our 3-word record at word 20:
-//   [ format version, high score, checksum ].
+//   Card layout (word offsets):
+//     0-19   game signature (every Vircon32 game that saves writes one)
+//     20     format version (2; version 1 held a single high score)
+//     21-25  table scores           26-30  table names
+//     31-33  demo seed, length in frames, score
+//     34     checksum of words 21-33
+//     35     checksum of the demo data
+//     40-    demo recording (REC_WORDS words)
 //   A card belonging to another game is never written to.
 
 #define CARD_NONE      0     // no card inserted
@@ -203,28 +406,73 @@ void add_flash( float amount, int color )
 #define CARD_EMPTY     2     // blank card, we can claim it
 #define CARD_OTHER     3     // used by a different game: hands off
 
-#define SAVE_OFFSET    20
-#define SAVE_VERSION   1
-#define SAVE_KEY       0x5F3A9C17
+#define SAVE_OFFSET     20
+#define SAVE_HEADER     16
+#define SAVE_DEMO_AT    40
+#define SAVE_VERSION    2
+#define SAVE_KEY        0x5F3A9C17
 
 int* save_signature_text = "ROCKFIELD VECTOR V1 ";   // exactly 20 characters
 int card_state = CARD_NONE;
 bool card_loaded = false;      // loaded the card currently inserted
-int save_message = 0;          // what to tell the player at game over
-int[ 3 ] save_record;
+int save_message = 0;          // what to tell the player after a game
+int[ SAVE_HEADER ] save_header;
+int[ REC_WORDS ] card_demo;
 
 #define SAVE_MSG_NONE      0
 #define SAVE_MSG_SAVED     1
 #define SAVE_MSG_NO_CARD   2
 #define SAVE_MSG_OTHER     3
 
-int save_checksum( int version, int value )
+int checksum( int* data, int count )
 {
-    return ( version * 31 + value ) ^ SAVE_KEY;
+    int h = SAVE_KEY, i;
+    for( i = 0; i < count; i++ )
+      h = ( ( h << 5 ) | ( ( h >> 27 ) & 31 ) ) ^ data[ i ];
+    return h;
 }
 
-// checks what card (if any) is inserted; loads our save the first
-// time we see it, keeping whichever high score is higher
+// version 1 saves: [ 1, score, checksum ]
+void load_old_save()
+{
+    if( save_header[ 2 ] == ( ( 1 * 31 + save_header[ 1 ] ) ^ SAVE_KEY ) )
+      table_merge( save_header[ 1 ], pack_name( "---" ) );
+}
+
+void load_save()
+{
+    int i;
+
+    card_read_data( save_header, SAVE_OFFSET, SAVE_HEADER );
+
+    if( save_header[ 0 ] == 1 )
+    {
+        load_old_save();
+        return;
+    }
+
+    if( save_header[ 0 ] != SAVE_VERSION ) return;
+    if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
+
+    for( i = 0; i < HS_COUNT; i++ )
+      table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
+
+    // take the card's demo if it is a better game than ours
+    if( save_header[ 13 ] > demo_score && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
+    {
+        card_read_data( card_demo, SAVE_DEMO_AT, REC_WORDS );
+        if( save_header[ 15 ] == checksum( card_demo, REC_WORDS ) )
+        {
+            memcpy( demo_data, card_demo, REC_WORDS );
+            demo_seed = save_header[ 11 ];
+            demo_frames = save_header[ 12 ];
+            demo_score = save_header[ 13 ];
+        }
+    }
+}
+
+// checks what card (if any) is inserted and loads our save
+// the first time we see it, merging it with what we have
 void refresh_card()
 {
     if( !card_is_connected() )
@@ -243,20 +491,17 @@ void refresh_card()
 
     if( card_state == CARD_OURS && !card_loaded )
     {
-        card_read_data( save_record, SAVE_OFFSET, 3 );
-
-        if( save_record[ 0 ] == SAVE_VERSION
-            && save_record[ 2 ] == save_checksum( save_record[ 0 ], save_record[ 1 ] )
-            && save_record[ 1 ] > high_score )
-          high_score = save_record[ 1 ];
+        load_save();
+        high_score = hs_score[ 0 ];
     }
 
     card_loaded = ( card_state != CARD_NONE );
 }
 
-// writes the high score; returns one of the SAVE_MSG values
-int save_high_score()
+// writes table and demo; returns one of the SAVE_MSG values
+int save_all()
 {
+    int i;
     refresh_card();
 
     if( card_state == CARD_NONE ) return SAVE_MSG_NO_CARD;
@@ -265,10 +510,20 @@ int save_high_score()
     if( card_state == CARD_EMPTY )
       card_write_signature( (game_signature*)save_signature_text );
 
-    save_record[ 0 ] = SAVE_VERSION;
-    save_record[ 1 ] = high_score;
-    save_record[ 2 ] = save_checksum( SAVE_VERSION, high_score );
-    card_write_data( save_record, SAVE_OFFSET, 3 );
+    save_header[ 0 ] = SAVE_VERSION;
+    for( i = 0; i < HS_COUNT; i++ )
+    {
+        save_header[ 1 + i ] = hs_score[ i ];
+        save_header[ 6 + i ] = hs_name[ i ];
+    }
+    save_header[ 11 ] = demo_seed;
+    save_header[ 12 ] = demo_frames;
+    save_header[ 13 ] = demo_score;
+    save_header[ 14 ] = checksum( &save_header[ 1 ], 13 );
+    save_header[ 15 ] = checksum( demo_data, REC_WORDS );
+
+    card_write_data( demo_data, SAVE_DEMO_AT, REC_WORDS );
+    card_write_data( save_header, SAVE_OFFSET, SAVE_HEADER );
 
     card_state = CARD_OURS;
     return SAVE_MSG_SAVED;
@@ -351,7 +606,7 @@ int spawn_rock( float x, float y, int size, float speed_bonus )
           rock_angle[ i ] = frand() * 6.2831853;
           rock_spin[ i ] = frand_range( -0.03, 0.03 );
           rock_size[ i ] = size;
-          rock_shape[ i ] = rand() % ROCK_SHAPES;
+          rock_shape[ i ] = grand() % ROCK_SHAPES;
           rock_flash[ i ] = 0;
           return i;
       }
@@ -381,7 +636,7 @@ void spawn_wave_rocks( int amount )
 
     for( i = 0; i < amount; i++ )
     {
-        if( rand() % 2 )
+        if( grand() % 2 )
         {
             x = frand() * screen_width;
             y = frand_range( -40, 40 );
@@ -459,7 +714,7 @@ float saucer_size()
 
 void reset_saucer_timer()
 {
-    saucer_spawn_timer = 600 + rand() % 600 - level * 30;
+    saucer_spawn_timer = 600 + grand() % 600 - level * 30;
     if( saucer_spawn_timer < 360 ) saucer_spawn_timer = 360;
 }
 
@@ -468,7 +723,7 @@ void spawn_saucer()
     float speed;
 
     // small saucers get more likely as the game goes on
-    saucer_small = ( rand() % 100 ) < ( level * 12 + score / 500 );
+    saucer_small = ( grand() % 100 ) < ( level * 12 + score / 500 );
     if( score < 3000 ) saucer_small = false;
 
     speed = 1.5;
@@ -477,7 +732,7 @@ void spawn_saucer()
     saucer_active = true;
     saucer_y = frand_range( 50, screen_height - 50 );
 
-    if( rand() % 2 )
+    if( grand() % 2 )
     {
         saucer_x = -25;
         saucer_vx = speed;
@@ -576,7 +831,7 @@ void explode( float x, float y, int amount, float speed, float length, int color
     {
         a = frand() * 6.2831853;
         v = speed * frand_range( 0.3, 1.0 );
-        spawn_particle_v( x, y, cos( a ) * v, sin( a ) * v, length, 30 + rand() % 30, color );
+        spawn_particle_v( x, y, cos( a ) * v, sin( a ) * v, length, 30 + grand() % 30, color );
     }
 }
 
@@ -632,6 +887,9 @@ void clear_effects()
     for( i = 0; i < MAX_POPUPS; i++ ) popup_life[ i ] = 0;
     for( i = 0; i < MAX_BULLETS; i++ ) bullet_life[ i ] = 0;
     for( i = 0; i < MAX_ENEMY_SHOTS; i++ ) eshot_life[ i ] = 0;
+    next_particle = 0;
+    next_ring = 0;
+    next_popup = 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -643,7 +901,7 @@ void add_score( int points, float x, float y )
     score += points;
     spawn_popup( x, y, points );
 
-    if( score > high_score )
+    if( !demo_mode && score > high_score )
     {
         high_score = score;
         new_high_score = true;
@@ -734,7 +992,7 @@ void kill_ship()
     {
         a = frand() * 6.2831853;
         spawn_particle_v( ship_x, ship_y, ship_vx * 0.5 + cos( a ) * 1.2, ship_vy * 0.5 + sin( a ) * 1.2,
-                          12, 70 + rand() % 30, SHIP_CORE );
+                          12, 70 + grand() % 30, SHIP_CORE );
     }
     explode( ship_x, ship_y, 22, 3.0, 4, SPARK_CORE );
     spawn_ring( ship_x, ship_y, 90, 30, SHIP_CORE );
@@ -776,43 +1034,216 @@ void start_wave()
     beat_timer = 60;
 }
 
-void new_game()
+// -----------------------------------------------------------------------------
+//   INITIALS ENTRY
+// -----------------------------------------------------------------------------
+
+void enter_title_page( int page );
+
+int* entry_charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ";
+#define ENTRY_CHARS 38
+
+int[ 3 ] entry_index;
+int entry_cursor;
+int entry_rank;
+
+void start_entry()
 {
+    entry_index[ 0 ] = 0;
+    entry_index[ 1 ] = 0;
+    entry_index[ 2 ] = 0;
+    entry_cursor = 0;
+    entry_rank = table_rank( score );
+    sfx( SND_EXTRA_LIFE, 0.6 );
+    enter_state( STATE_ENTRY );
+}
+
+// held buttons repeat after a short delay
+bool pressed_or_repeat( int held_frames )
+{
+    return held_frames == 1 || ( held_frames > 18 && held_frames % 5 == 0 );
+}
+
+void finish_entry()
+{
+    int[ 4 ] name;
+    name[ 0 ] = entry_charset[ entry_index[ 0 ] ];
+    name[ 1 ] = entry_charset[ entry_index[ 1 ] ];
+    name[ 2 ] = entry_charset[ entry_index[ 2 ] ];
+    name[ 3 ] = 0;
+
+    table_insert( score, pack_name( name ), entry_rank );
+    high_score = hs_score[ 0 ];
+    save_message = save_all();
+    sfx( SND_START, 0.6 );
+
+    highlight_rank = entry_rank;
+    enter_title_page( PAGE_SCORES );
+}
+
+void update_entry()
+{
+    int i = entry_cursor;
+
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        entry_index[ i ]++;
+        if( entry_index[ i ] >= ENTRY_CHARS ) entry_index[ i ] = 0;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        entry_index[ i ]--;
+        if( entry_index[ i ] < 0 ) entry_index[ i ] = ENTRY_CHARS - 1;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( gamepad_left() == 1 && entry_cursor > 0 ) entry_cursor--;
+    if( gamepad_right() == 1 && entry_cursor < 2 ) entry_cursor++;
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( entry_cursor < 2 )
+        {
+            entry_cursor++;
+            sfx( SND_PAUSE, 0.4 );
+        }
+        else
+        {
+            finish_entry();
+            return;
+        }
+    }
+
+    // Start confirms right away; after 30 s it confirms by itself
+    if( gamepad_button_start() == 1 || state_timer > 1800 )
+      finish_entry();
+}
+
+// resets every piece of gameplay state, then seeds the gameplay RNG:
+// a live game and its replay must start out bit-for-bit identical
+void begin_game( int seed, bool demo )
+{
+    int i;
+
+    // forget the title screen's world without touching the RNG
+    saucer_active = false;
+    set_saucer_sound( false, false );
+    set_thrust_sound( false );
     clear_rocks();
     clear_effects();
-    if( saucer_active ) remove_saucer();
+
+    game_seed = seed;
+    gseed( seed );
+    fx_state = seed ^ 0x2545F491;
+    if( fx_state == 0 ) fx_state = 1;
+
+    demo_mode = demo;
+    demo_pos = 0;
+    game_frame = 0;
+    rec_frames = 0;
+    for( i = 0; i < REC_WORDS; i++ ) rec_data[ i ] = 0;
+    in_bits = 0;
+    fire_frames = 0;
+    hyper_frames = 0;
 
     score = 0;
     new_high_score = false;
+    high_score = hs_score[ 0 ];
     lives = 3;
     level = 1;
     next_extra_life = 10000;
     next_wave_timer = 0;
     fire_cooldown = 0;
     paused = false;
+    beat_high = false;
+    ship_thrusting = false;
+    ship_respawn_timer = 0;
+    shake = 0;
+    flash = 0;
+    save_message = SAVE_MSG_NONE;
+
     reset_ship();
     reset_saucer_timer();
     start_wave();
 
-    sfx( SND_START, 0.7 );
-    enter_state( STATE_PLAYING );
+    if( demo )
+    {
+        set_global_volume( 0 );        // the attract demo plays silently
+        enter_state( STATE_DEMO );
+    }
+    else
+    {
+        set_global_volume( 0.85 );
+        sfx( SND_START, 0.7 );
+        enter_state( STATE_PLAYING );
+    }
+}
+
+void new_game()
+{
+    // hardware RNG (seeded from the clock) picks the game's seed
+    begin_game( rand() % 2000000000 + 1, false );
 }
 
 // title screen: a few rocks drifting in the background
-void enter_title()
+void enter_title_page( int page )
 {
     int i;
 
     clear_rocks();
     clear_effects();
     if( saucer_active ) remove_saucer();
-    set_thrust_sound( false );
+    stop_all_channels();
+    thrust_sound_on = false;
+    saucer_sound_on = false;
+    set_global_volume( 0.85 );
+    demo_mode = false;
     level = 1;
+    shake = 0;
+    flash = 0;
 
     for( i = 0; i < 7; i++ )
-      spawn_rock( frand() * screen_width, frand() * screen_height, 1 + rand() % 3, 0 );
+      spawn_rock( frand() * screen_width, frand() * screen_height, 1 + grand() % 3, 0 );
 
+    title_page = page;
     enter_state( STATE_TITLE );
+}
+
+void enter_title()
+{
+    highlight_rank = -1;
+    enter_title_page( PAGE_LOGO );
+}
+
+// a live game just ended: keep its recording if it's the best game
+// so far, then either ask for initials or show the game over screen
+void finish_game()
+{
+    bool demo_changed = false;
+
+    if( saucer_active ) remove_saucer();
+    set_thrust_sound( false );
+
+    if( score > demo_score && rec_frames >= DEMO_MIN_FRAMES )
+    {
+        memcpy( demo_data, rec_data, REC_WORDS );
+        demo_seed = game_seed;
+        demo_frames = rec_frames;
+        demo_score = score;
+        demo_changed = true;
+    }
+
+    if( table_rank( score ) >= 0 )
+    {
+        start_entry();
+        return;
+    }
+
+    save_message = SAVE_MSG_NONE;
+    if( demo_changed ) save_message = save_all();
+    enter_state( STATE_GAMEOVER );
 }
 
 // the centre must be clear before the ship comes back
@@ -871,7 +1302,7 @@ void update_ship()
         return;
     }
 
-    if( gamepad_button_x() == 1 )
+    if( hyper_frames == 1 )
     {
         ship_hyperspace = 40;
         ship_thrusting = false;
@@ -882,10 +1313,10 @@ void update_ship()
         return;
     }
 
-    if( gamepad_left() > 0 )  ship_angle -= 0.075;
-    if( gamepad_right() > 0 ) ship_angle += 0.075;
+    if( in_bits & IN_LEFT )  ship_angle -= 0.075;
+    if( in_bits & IN_RIGHT ) ship_angle += 0.075;
 
-    ship_thrusting = ( gamepad_up() > 0 || gamepad_button_a() > 0 );
+    ship_thrusting = ( in_bits & IN_THRUST ) != 0;
     set_thrust_sound( ship_thrusting );
 
     c = cos( ship_angle );
@@ -900,7 +1331,7 @@ void update_ship()
         spawn_particle_v( ship_x - c * 8, ship_y - s * 8,
                           ship_vx - c * frand_range( 1.5, 3.0 ) + frand_range( -0.4, 0.4 ),
                           ship_vy - s * frand_range( 1.5, 3.0 ) + frand_range( -0.4, 0.4 ),
-                          2.5, 12 + rand() % 8, FLAME_CORE );
+                          2.5, 12 + grand() % 8, FLAME_CORE );
     }
 
     // limit speed, apply drag
@@ -918,7 +1349,7 @@ void update_ship()
 
     // fire on press, auto-repeat while held
     if( fire_cooldown > 0 ) fire_cooldown--;
-    if( gamepad_button_b() == 1 || ( gamepad_button_b() > 0 && fire_cooldown == 0 ) )
+    if( fire_frames == 1 || ( fire_frames > 0 && fire_cooldown == 0 ) )
     {
         fire_bullet();
         fire_cooldown = 10;
@@ -944,7 +1375,7 @@ void update_saucer()
     if( !saucer_active )
     {
         // only appear while the player is around to fight it
-        if( state == STATE_PLAYING && ship_alive && next_wave_timer == 0 )
+        if( in_game() && ship_alive && next_wave_timer == 0 )
         {
             saucer_spawn_timer--;
             if( saucer_spawn_timer <= 0 ) spawn_saucer();
@@ -959,8 +1390,8 @@ void update_saucer()
     saucer_turn_timer--;
     if( saucer_turn_timer <= 0 )
     {
-        saucer_turn_timer = 50 + rand() % 70;
-        saucer_vy = ( ( rand() % 3 ) - 1 ) * fabs( saucer_vx ) * 0.8;
+        saucer_turn_timer = 50 + grand() % 70;
+        saucer_vy = ( ( grand() % 3 ) - 1 ) * fabs( saucer_vx ) * 0.8;
     }
 
     saucer_fire_timer--;
@@ -1159,7 +1590,9 @@ void update_beat()
 
 void update_playing()
 {
-    if( gamepad_button_start() == 1 )
+    int bits;
+
+    if( !demo_mode && gamepad_button_start() == 1 )
     {
         paused = !paused;
 
@@ -1170,6 +1603,21 @@ void update_playing()
     }
 
     if( paused ) return;
+
+    // this logic frame's input: replayed, or read live and recorded
+    if( demo_mode )
+    {
+        bits = rec_get( demo_data, demo_pos );
+        demo_pos++;
+    }
+    else
+    {
+        bits = read_gamepad_bits();
+        rec_add( bits );
+    }
+
+    apply_input( bits );
+    game_frame++;
 
     update_ship();
     update_world();
@@ -1196,10 +1644,8 @@ void update_playing()
 
     if( lives <= 0 && !ship_alive && ship_respawn_timer < 40 )
     {
-        if( saucer_active ) remove_saucer();
-        save_message = SAVE_MSG_NONE;
-        if( new_high_score ) save_message = save_high_score();
-        enter_state( STATE_GAMEOVER );
+        if( demo_mode ) enter_title();
+        else finish_game();
     }
 }
 
@@ -1211,6 +1657,8 @@ void update_playing()
 float[ STARS ] star_x;
 float[ STARS ] star_y;
 float[ STARS ] star_phase;
+
+void draw_card_status();
 
 // effect fades are relative to the world brightness
 void world_intensity( float f )
@@ -1226,7 +1674,7 @@ void draw_stars()
     vec_thickness( 1 );
     for( i = 0; i < STARS; i++ )
     {
-        b = 0.55 + 0.45 * sin( frame * 0.03 + star_phase[ i ] );
+        b = 0.55 + 0.45 * sin( anim * 0.03 + star_phase[ i ] );
         vec_color( make_color_rgb( 50 + 50 * b, 50 + 50 * b, 80 + 60 * b ), 0 );
         vec_line( star_x[ i ], star_y[ i ], star_x[ i ] + 1, star_y[ i ] );
     }
@@ -1261,7 +1709,7 @@ void draw_saucer()
     // chasing running lights along the hull
     vec_thickness( 2.5 );
     for( i = 0; i < 3; i++ )
-      if( ( frame / 6 + i ) % 3 == 0 )
+      if( ( anim / 6 + i ) % 3 == 0 )
       {
           vec_color( 0xFF40FFFF, 0xFF208080 );
           vec_line( saucer_x + ( i - 1 ) * size * 0.45 - 1, saucer_y + size * 0.16,
@@ -1293,8 +1741,8 @@ void draw_world()
     if( saucer_active ) draw_saucer();
 
     // ship (blinks while invulnerable)
-    ship_visible = ship_alive && ship_hyperspace == 0 && state == STATE_PLAYING;
-    if( ship_invulnerable > 0 && ( frame / 4 ) % 2 == 0 ) ship_visible = false;
+    ship_visible = ship_alive && ship_hyperspace == 0 && in_game();
+    if( ship_invulnerable > 0 && ( anim / 4 ) % 2 == 0 ) ship_visible = false;
 
     if( ship_visible )
     {
@@ -1307,7 +1755,7 @@ void draw_world()
         {
             c = cos( ship_angle );
             s = sin( ship_angle );
-            len = 10 + ( rand() % 9 );
+            len = 10 + ( fxrand() % 9 );
             vec_color( FLAME_CORE, FLAME_GLOW );
             vec_line( ship_x - c * 6 - s * 4, ship_y - s * 6 + c * 4, ship_x - c * len, ship_y - s * len );
             vec_line( ship_x - c * 6 + s * 4, ship_y - s * 6 - c * 4, ship_x - c * len, ship_y - s * len );
@@ -1329,7 +1777,7 @@ void draw_world()
     for( i = 0; i < MAX_ENEMY_SHOTS; i++ )
       if( eshot_life[ i ] > 0 )
       {
-          r = 2.5 + ( frame % 6 ) * 0.3;
+          r = 2.5 + ( anim % 6 ) * 0.3;
           vec_line( eshot_x[ i ] - r, eshot_y[ i ], eshot_x[ i ], eshot_y[ i ] - r );
           vec_line( eshot_x[ i ], eshot_y[ i ] - r, eshot_x[ i ] + r, eshot_y[ i ] );
           vec_line( eshot_x[ i ] + r, eshot_y[ i ], eshot_x[ i ], eshot_y[ i ] + r );
@@ -1400,7 +1848,7 @@ void draw_hud()
     vec_number( level, 548 + vec_text_width( "WAVE ", 6 ), 14, 6 );
 
     // wave announcement fades in and out
-    if( wave_banner > 0 && state == STATE_PLAYING )
+    if( wave_banner > 0 && in_game() )
     {
         vec_intensity( fmin( 1.0, fmin( wave_banner / 30.0, ( 150 - wave_banner ) / 20.0 ) ) );
         vec_thickness( 2.5 );
@@ -1474,13 +1922,7 @@ void draw_title()
     vec_text( "HIGH SCORE", 230, 320, 6 );
     vec_number( high_score, 230 + vec_text_width( "HIGH SCORE ", 6 ), 320, 6 );
 
-    // memory card status
-    vec_thickness( 1.2 );
-    vec_color( 0xFF907070, 0 );
-    if( card_state == CARD_OURS )       vec_text_centered( "HIGH SCORE SAVED ON MEMORY CARD", 320, 342, 4.2 );
-    else if( card_state == CARD_EMPTY ) vec_text_centered( "MEMORY CARD READY", 320, 342, 4.2 );
-    else if( card_state == CARD_OTHER ) vec_text_centered( "MEMORY CARD HAS ANOTHER GAME - NOT SAVING", 320, 342, 4.2 );
-    else                                vec_text_centered( "NO MEMORY CARD - HIGH SCORE WILL NOT BE SAVED", 320, 342, 4.2 );
+    draw_card_status();
 
     vec_intensity( 1 );
 }
@@ -1521,6 +1963,193 @@ void draw_game_over()
     vec_intensity( 1 );
 }
 
+// width of a number drawn with vec_number, for right-aligning
+float number_width( int value, float size )
+{
+    int digits = 1;
+    while( value >= 10 )
+    {
+        value /= 10;
+        digits++;
+    }
+    return ( digits * 1.6 - 0.6 ) * size;
+}
+
+void draw_card_status()
+{
+    vec_thickness( 1.2 );
+    vec_glow_size( 8 );
+    vec_color( 0xFF907070, 0 );
+    if( card_state == CARD_OURS )       vec_text_centered( "HIGH SCORES SAVED ON MEMORY CARD", 320, 342, 4.2 );
+    else if( card_state == CARD_EMPTY ) vec_text_centered( "MEMORY CARD READY", 320, 342, 4.2 );
+    else if( card_state == CARD_OTHER ) vec_text_centered( "MEMORY CARD HAS ANOTHER GAME - NOT SAVING", 320, 342, 4.2 );
+    else                                vec_text_centered( "NO MEMORY CARD - HIGH SCORES WILL NOT BE SAVED", 320, 342, 4.2 );
+}
+
+void draw_scores_page()
+{
+    int i;
+    float y, t;
+    int[ 4 ] name;
+    int[ 2 ] rank_text;
+
+    t = fmin( 1.0, state_timer / 30.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    vec_color( 0xFFFFE0A0, 0xFF805020 );
+    vec_text_centered( "HIGH SCORES", 320, 34, 15 );
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0xFF603020 );
+    vec_dashed_line( 170, 82, 470, 82, 8, 6 );
+
+    rank_text[ 1 ] = 0;
+
+    for( i = 0; i < HS_COUNT; i++ )
+    {
+        y = 104 + i * 40;
+
+        // rows slide in one after another
+        vec_intensity( t * fmin( 1.0, fmax( 0.0, ( state_timer - i * 8 ) / 20.0 ) ) );
+
+        if( i == highlight_rank )
+        {
+            vec_thickness( 2.5 );
+            vec_glow_size( 18 );
+            if( ( frame / 10 ) % 2 ) vec_color( 0xFF60FFFF, 0xFF208080 );
+            else vec_color( 0xFFFFFFFF, 0xFF406060 );
+        }
+        else
+        {
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            if( i == 0 ) vec_color( 0xFFFFF0B0, 0xFF805020 );
+            else vec_color( 0xFFF0D8E8, 0xFF603848 );
+        }
+
+        rank_text[ 0 ] = '1' + i;
+        vec_text( rank_text, 180, y, 9 );
+        unpack_name( hs_name[ i ], name );
+        vec_text( name, 230, y, 9 );
+        vec_number( hs_score[ i ], 460 - number_width( hs_score[ i ], 9 ), y, 9 );
+    }
+
+    vec_intensity( t );
+
+    if( save_message != SAVE_MSG_NONE && highlight_rank >= 0 )
+    {
+        vec_thickness( 1.5 );
+        vec_glow_size( 10 );
+        vec_color( 0xFFC0A0A0, 0 );
+        if( save_message == SAVE_MSG_SAVED )        vec_text_centered( "SAVED TO MEMORY CARD", 320, 312, 5 );
+        else if( save_message == SAVE_MSG_NO_CARD ) vec_text_centered( "NO MEMORY CARD - NOT SAVED", 320, 312, 5 );
+        else                                        vec_text_centered( "CARD HAS ANOTHER GAME - NOT SAVED", 320, 312, 5 );
+    }
+    else if( ( frame / 30 ) % 2 == 0 )
+    {
+        vec_thickness( 2 );
+        vec_glow_size( 14 );
+        vec_color( TEXT_CORE, TEXT_GLOW );
+        vec_text_centered( "PRESS START", 320, 308, 8 );
+    }
+
+    draw_card_status();
+    vec_intensity( 1 );
+}
+
+void draw_entry()
+{
+    int i;
+    float x, w, t;
+    int[ 2 ] letter;
+
+    t = fmin( 1.0, state_timer / 25.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    if( entry_rank == 0 )
+    {
+        vec_color( 0xFF60FFFF, 0xFF205050 );
+        vec_text_centered( "NEW HIGH SCORE", 320, 30, 14 );
+    }
+    else
+    {
+        vec_color( 0xFFFFE0A0, 0xFF805020 );
+        vec_text_centered( "TOP 5 SCORE", 320, 30, 14 );
+    }
+
+    vec_thickness( 2.5 );
+    vec_glow_size( 16 );
+    vec_color( TEXT_CORE, TEXT_GLOW );
+    w = number_width( score, 12 );
+    vec_number( score, 320 - w / 2, 84, 12 );
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "ENTER YOUR INITIALS", 320, 136, 6 );
+
+    // three big letters, the one being edited glows and bobs
+    letter[ 1 ] = 0;
+    for( i = 0; i < 3; i++ )
+    {
+        x = 320 - 90 + i * 70;
+        letter[ 0 ] = entry_charset[ entry_index[ i ] ];
+
+        if( i == entry_cursor )
+        {
+            vec_thickness( 3.5 );
+            vec_glow_size( 26 );
+            vec_color( 0xFF60FFFF, 0xFF208080 );
+            vec_text( letter, x, 170 + 3 * sin( frame * 0.2 ), 20 );
+            if( ( frame / 15 ) % 2 == 0 ) vec_line( x - 4, 226, x + 24, 226 );
+        }
+        else
+        {
+            vec_thickness( 3 );
+            vec_glow_size( 18 );
+            vec_color( 0xFFF0D8E8, 0xFF603848 );
+            vec_text( letter, x, 170, 20 );
+            vec_line( x - 4, 226, x + 24, 226 );
+        }
+
+        // a space would be invisible; show where it is
+        if( letter[ 0 ] == ' ' )
+        {
+            vec_thickness( 1.5 );
+            vec_dashed_line( x, 210, x + 20, 210, 3, 3 );
+        }
+    }
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "UP DOWN  CHANGE     LEFT RIGHT  MOVE", 320, 268, 5 );
+    vec_text_centered( "B  NEXT     START  DONE", 320, 290, 5 );
+
+    vec_intensity( 1 );
+}
+
+void draw_demo_overlay()
+{
+    vec_thickness( 2.5 );
+    vec_glow_size( 16 );
+    if( ( frame / 40 ) % 2 == 0 )
+    {
+        vec_color( 0xFFFFE0A0, 0xFF805020 );
+        vec_text_centered( "DEMO", 320, 80, 10 );
+    }
+
+    vec_thickness( 2 );
+    vec_glow_size( 14 );
+    vec_color( TEXT_CORE, TEXT_GLOW );
+    vec_text_centered( "PRESS START", 320, 318, 8 );
+}
+
 void draw_flash()
 {
     if( flash > 0.01 )
@@ -1541,7 +2170,12 @@ void main()
     init_sounds();
     set_global_volume( 0.85 );
     select_gamepad( 0 );
+    init_table();
+    load_builtin_demo();
 
+    // fixed seed: rock outlines and stars look the same on every boot,
+    // so demos saved on a card replay with identical shapes
+    gseed( 20261031 );
     build_rock_shapes();
     for( i = 0; i < STARS; i++ )
     {
@@ -1549,8 +2183,10 @@ void main()
         star_y[ i ] = frand() * screen_height;
         star_phase[ i ] = frand() * 6.2831853;
     }
+    gseed( rand() + 1 );
 
     refresh_card();
+    high_score = hs_score[ 0 ];
     enter_title();
 
     while( true )
@@ -1561,11 +2197,37 @@ void main()
             // notices cards being inserted or swapped on the title screen
             refresh_card();
             update_world();
+
             if( gamepad_button_start() == 1 && state_timer > 20 ) new_game();
+
+            // logo -> high scores -> demo -> logo ...
+            else if( title_page == PAGE_LOGO && state_timer > 480 )
+              enter_title_page( PAGE_SCORES );
+            else if( title_page == PAGE_SCORES && state_timer > 360 )
+            {
+                highlight_rank = -1;
+                if( demo_frames > 0 ) begin_game( demo_seed, true );
+                else enter_title_page( PAGE_LOGO );
+            }
         }
         else if( state == STATE_PLAYING )
         {
             update_playing();
+        }
+        else if( state == STATE_DEMO )
+        {
+            if( gamepad_button_start() == 1 ) new_game();
+            else
+            {
+                update_playing();
+                if( state == STATE_DEMO && ( demo_pos >= demo_frames || demo_pos >= DEMO_MAX_PLAY ) )
+                  enter_title();
+            }
+        }
+        else if( state == STATE_ENTRY )
+        {
+            update_world();
+            update_entry();
         }
         else
         {
@@ -1582,21 +2244,33 @@ void main()
         }
 
         // --- draw ---
+        anim = frame;
+        if( in_game() ) anim = game_frame;
+
         clear_screen( make_color_rgb( 4, 3, 10 ) );
 
-        vec_offset( frand_range( -shake, shake ), frand_range( -shake, shake ) );
+        vec_offset( fx_range( -shake, shake ), fx_range( -shake, shake ) );
         world_dim = 1.0;
         if( paused ) world_dim = 0.35;
-        if( state == STATE_TITLE ) world_dim = 0.45;
+        if( state == STATE_TITLE || state == STATE_ENTRY ) world_dim = 0.4;
         vec_intensity( world_dim );
         draw_stars();
         draw_world();
         vec_intensity( 1 );
         vec_offset( 0, 0 );
 
-        if( state == STATE_TITLE ) draw_title();
-        else draw_hud();
-        if( state == STATE_GAMEOVER ) draw_game_over();
+        if( state == STATE_TITLE )
+        {
+            if( title_page == PAGE_LOGO ) draw_title();
+            else draw_scores_page();
+        }
+        else if( state == STATE_ENTRY ) draw_entry();
+        else
+        {
+            draw_hud();
+            if( state == STATE_GAMEOVER ) draw_game_over();
+            if( state == STATE_DEMO ) draw_demo_overlay();
+        }
 
         // lines first, then the additive flash over everything
         vec_flush();

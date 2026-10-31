@@ -26,6 +26,7 @@
 //     vec_thickness( pixels )                  core line width
 //     vec_glow_size( pixels )                  halo width
 //     vec_line( x1, y1, x2, y2 )
+//     vec_line_polar( x, y, length, angle )    faster when you know these
 //     vec_polyline( xs, ys, count, closed )
 //     vec_shape( xs, ys, count, x, y, angle, scale )   transformed, closed
 //     vec_shape_wrapped( ..., radius )         also draws screen-wrap copies
@@ -101,6 +102,8 @@ float[ VEC_MAX_POINTS ] vec_tmp_y;
 // texture layout expected (from vector_lines.png):
 //   x = 0, y = 0..3   solid white strip  (line core)
 //   x = 2, y = 0..31  gaussian strip     (line glow)
+void vec_init_font();
+
 void vec_init( int texture_id, int first_region )
 {
     int previous_texture = get_selected_texture();
@@ -120,6 +123,7 @@ void vec_init( int texture_id, int first_region )
 
     select_texture( previous_texture );
     vec_q_count = 0;
+    vec_init_font();
 }
 
 // multiplies a color's alpha (for line cores: fades them out)
@@ -214,6 +218,26 @@ void vec_line( float x1, float y1, float x2, float y2 )
     vec_q_y1[ i ] = y1 + vec_offset_y;
     vec_q_length[ i ] = sqrt( dx*dx + dy*dy ) + 1.0;
     vec_q_angle[ i ] = atan2( dy, dx );
+    vec_q_thickness[ i ] = vec_current_thickness;
+    vec_q_glow_size[ i ] = vec_current_glow_size;
+    vec_q_core[ i ] = vec_current_core;
+    vec_q_glow[ i ] = vec_current_glow;
+    vec_q_count++;
+}
+
+// queues a line given by start point, length and angle (no sqrt/atan2)
+void vec_line_polar( float x, float y, float length, float angle )
+{
+    int i;
+
+    if( vec_q_count >= VEC_MAX_LINES || vec_current_intensity <= 0 )
+      return;
+
+    i = vec_q_count;
+    vec_q_x1[ i ] = x + vec_offset_x;
+    vec_q_y1[ i ] = y + vec_offset_y;
+    vec_q_length[ i ] = length + 1.0;
+    vec_q_angle[ i ] = angle;
     vec_q_thickness[ i ] = vec_current_thickness;
     vec_q_glow_size[ i ] = vec_current_glow_size;
     vec_q_core[ i ] = vec_current_core;
@@ -335,32 +359,98 @@ void vec_flush()
 {
     int i;
     int previous_texture = get_selected_texture();
+    int last_color = 0;
+    int color, px, py;
+    float length, height, angle;
 
     select_texture( vec_texture_id );
+
+    // the inner loops write GPU ports directly (the same ports video.h
+    // uses), avoiding 4 function calls per line, and only send the
+    // multiply color when it changes; this roughly halves the CPU time
 
     // pass 1: halos, added together
     set_blending_mode( blending_add );
     select_region( vec_region_glow );
+    set_multiply_color( 0 );
 
     for( i = 0; i < vec_q_count; i++ )
-      if( vec_q_glow[ i ] )
-      {
-          set_multiply_color( vec_q_glow[ i ] );
-          set_drawing_scale( vec_q_length[ i ], vec_q_glow_size[ i ] / 32.0 );
-          set_drawing_angle( vec_q_angle[ i ] );
-          draw_region_rotozoomed_at( vec_q_x1[ i ], vec_q_y1[ i ] );
-      }
+    {
+        color = vec_q_glow[ i ];
+        if( color )
+        {
+            length = vec_q_length[ i ];
+            height = vec_q_glow_size[ i ] / 32.0;
+            angle = vec_q_angle[ i ];
+            px = vec_q_x1[ i ];
+            py = vec_q_y1[ i ];
+
+            if( color != last_color )
+            {
+                asm
+                {
+                    "mov R0, {color}"
+                    "out GPU_MultiplyColor, R0"
+                }
+                last_color = color;
+            }
+
+            asm
+            {
+                "mov R0, {length}"
+                "out GPU_DrawingScaleX, R0"
+                "mov R0, {height}"
+                "out GPU_DrawingScaleY, R0"
+                "mov R0, {angle}"
+                "out GPU_DrawingAngle, R0"
+                "mov R0, {px}"
+                "out GPU_DrawingPointX, R0"
+                "mov R0, {py}"
+                "out GPU_DrawingPointY, R0"
+                "out GPU_Command, GPUCommand_DrawRegionRotozoomed"
+            }
+        }
+    }
 
     // pass 2: sharp lines on top
     set_blending_mode( blending_alpha );
     select_region( vec_region_core );
+    set_multiply_color( 0 );
+    last_color = 0;
 
     for( i = 0; i < vec_q_count; i++ )
     {
-        set_multiply_color( vec_q_core[ i ] );
-        set_drawing_scale( vec_q_length[ i ], vec_q_thickness[ i ] / 4.0 );
-        set_drawing_angle( vec_q_angle[ i ] );
-        draw_region_rotozoomed_at( vec_q_x1[ i ], vec_q_y1[ i ] );
+        color = vec_q_core[ i ];
+        length = vec_q_length[ i ];
+        height = vec_q_thickness[ i ] / 4.0;
+        angle = vec_q_angle[ i ];
+        px = vec_q_x1[ i ];
+        py = vec_q_y1[ i ];
+
+        if( color != last_color )
+        {
+            asm
+            {
+                "mov R0, {color}"
+                "out GPU_MultiplyColor, R0"
+            }
+            last_color = color;
+        }
+
+        asm
+        {
+            "mov R0, {length}"
+            "out GPU_DrawingScaleX, R0"
+            "mov R0, {height}"
+            "out GPU_DrawingScaleY, R0"
+            "mov R0, {angle}"
+            "out GPU_DrawingAngle, R0"
+            "mov R0, {px}"
+            "out GPU_DrawingPointX, R0"
+            "mov R0, {py}"
+            "out GPU_DrawingPointY, R0"
+            "out GPU_Command, GPUCommand_DrawRegionRotozoomed"
+        }
     }
 
     // leave GPU in a neutral state for other drawing code
@@ -465,11 +555,36 @@ void vec_fill_rect( float x, float y, float w, float h, int color, int blend_mod
 int[ 20 ] vec_seg_a = { 0, 2, 5, 6, 3, 0, 3, 4, 0, 1, 2, 4, 4, 4, 3, 5, 0, 6, 1, 7 };
 int[ 20 ] vec_seg_b = { 2, 5, 8, 8, 6, 3, 4, 5, 4, 4, 4, 6, 7, 8, 7, 7, 1, 7, 5, 5 };
 
+// per-segment start point, length and angle for a size-1 cell,
+// computed once by vec_init (text then needs no sqrt or atan2)
+float[ 20 ] vec_seg_x;
+float[ 20 ] vec_seg_y;
+float[ 20 ] vec_seg_len;
+float[ 20 ] vec_seg_ang;
+
+void vec_init_font()
+{
+    int s;
+    float ax, ay, bx, by;
+
+    for( s = 0; s < 20; s++ )
+    {
+        ax = ( vec_seg_a[ s ] % 3 ) * 0.5;
+        ay = ( vec_seg_a[ s ] / 3 );
+        bx = ( vec_seg_b[ s ] % 3 ) * 0.5;
+        by = ( vec_seg_b[ s ] / 3 );
+        vec_seg_x[ s ] = ax;
+        vec_seg_y[ s ] = ay;
+        vec_seg_len[ s ] = sqrt( ( bx - ax ) * ( bx - ax ) + ( by - ay ) * ( by - ay ) );
+        vec_seg_ang[ s ] = atan2( by - ay, bx - ax );
+    }
+}
+
 // segment bitmasks for '0'-'9' then 'A'-'Z'
 int[ 36 ] vec_font =
 {
     0x0C3F, 0x1200, 0x00DB, 0x008F, 0x00E6, 0x00ED, 0x00FD, 0x0007, 0x00FF, 0x00EF,   // 0-9
-    0x00F7, 0xF00F0, 0x0039, 0xF0030, 0x0079, 0x0071, 0x00BD, 0x00F6, 0x1209, 0x001E,   // A-J
+    0x00F7, 0xA00F3, 0x0039, 0xF0030, 0x0079, 0x0071, 0x00BD, 0x00F6, 0x1209, 0x001E,   // A-J
     0x2470, 0x0038, 0x0536, 0x2136, 0x003F, 0x00F3, 0x203F, 0x20F3, 0x00ED, 0x1201,   // K-T
     0x003E, 0xC022, 0x2836, 0x2D00, 0x1500, 0x0C09                                    // U-Z
 };
@@ -478,8 +593,6 @@ void vec_char( int c, float x, float y, float size )
 {
     int mask = 0;
     int s;
-    float ax, ay, bx, by;
-
     if( c >= 'a' && c <= 'z' ) c = c - 'a' + 'A';
 
     if( c >= '0' && c <= '9' )      mask = vec_font[ c - '0' ];
@@ -495,15 +608,15 @@ void vec_char( int c, float x, float y, float size )
         return;
     }
 
-    for( s = 0; s < 20; s++ )
-      if( mask & ( 1 << s ) )
-      {
-          ax = x + ( vec_seg_a[ s ] % 3 ) * 0.5 * size;
-          ay = y + ( vec_seg_a[ s ] / 3 ) * size;
-          bx = x + ( vec_seg_b[ s ] % 3 ) * 0.5 * size;
-          by = y + ( vec_seg_b[ s ] / 3 ) * size;
-          vec_line( ax, ay, bx, by );
-      }
+    s = 0;
+    while( mask )
+    {
+        if( mask & 1 )
+          vec_line_polar( x + vec_seg_x[ s ] * size, y + vec_seg_y[ s ] * size,
+                          vec_seg_len[ s ] * size, vec_seg_ang[ s ] );
+        mask = mask >> 1;
+        s++;
+    }
 }
 
 // width in pixels of a text drawn with vec_text
