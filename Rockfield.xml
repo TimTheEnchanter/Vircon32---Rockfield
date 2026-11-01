@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <rom-definition version="1.0">
-    <rom type="cartridge" title="Rockfield" version="1.4" />
+    <rom type="cartridge" title="Rockfield" version="1.0" />
     <binary path="obj/Rockfield.vbin" />
     <textures>
         <texture path="vector_lines.vtex" />

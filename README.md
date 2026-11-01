@@ -1,6 +1,12 @@
 # Rockfield + vector.h for Vircon32
 
+Version 1.0. A vector-graphics arcade game for the Vircon32 fantasy console, and the vector drawing library it's built on.
+
 **Rockfield.v32** is the ready-to-play cartridge. Load it in the Vircon32 emulator.
+
+![Gameplay](screenshots/gameplay.png)
+
+More screenshots are in `screenshots/`. See `CHANGELOG.md` for everything in this release.
 
 ## Controls
 
@@ -11,7 +17,9 @@
 | B | Fire (hold for auto-fire) |
 | X | Hyperspace |
 | Y | Shield (hold) |
-| Start | Start game / pause |
+| Start | Start game / pause menu |
+
+The pause menu has Resume, Options and Quit to Title. Quitting needs a second press of B, and a game you quit isn't scored. Options opened from the pause menu return to it, with the game still frozen.
 
 On the initials entry screen, Up and Down change the letter, Left and Right move between letters, B moves on to the next letter, and Start finishes. Entry confirms by itself after 30 seconds.
 
@@ -149,6 +157,9 @@ Card layout, in 32-bit words:
 
 ## Files
 
+- `LICENSE`: MIT license.
+- `CHANGELOG.md`: what's in each release.
+- `screenshots/`: title, gameplay, high scores and options screens.
 - `vector.h`: the vector graphics library. Its API is documented at the top of the file.
 - `vector_lines.png`: the small texture the library draws its lines from.
 - `Rockfield.c`, `Rockfield.xml`: the game source and its ROM definition.
@@ -167,15 +178,18 @@ Card layout, in 32-bit words:
 
 ## Building
 
-With the Vircon32 dev tools on your PATH:
+With the Vircon32 dev tools on your PATH, and Python 3 with NumPy, run these from this folder:
 
 ```
 python3 make_sounds.py
 png2vircon vector_lines.png -o vector_lines.vtex
+mkdir -p obj
 compile Rockfield.c -o obj/Rockfield.asm
 assemble obj/Rockfield.asm -o obj/Rockfield.vbin
 packrom Rockfield.xml -o Rockfield.v32
 ```
+
+`make_sounds.py` also regenerates `music_data.h`. The result is identical to the included `Rockfield.v32`.
 
 The order of the sounds in `Rockfield.xml` must match the `SND_` numbers in `Rockfield.c`. That is the same order as the `SOUNDS` list in `make_sounds.py`.
 

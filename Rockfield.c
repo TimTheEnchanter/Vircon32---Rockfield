@@ -7,6 +7,7 @@
 // =============================================================================
 
 #define VEC_MAX_LINES 1300
+#define ROCKFIELD_VERSION "V1.0"
 
 #include "video.h"
 #include "math.h"
@@ -349,13 +350,27 @@ int demo_score = 0;
 int demo_difficulty = DIFF_NORMAL;
 int[ REC_WORDS ] demo_data;
 
+// after closing the pause menu with B or A, those buttons are ignored until
+// released, so resuming doesn't fire a shot or give a burst of thrust
+bool input_lock = false;
+
 int read_gamepad_bits()
 {
     int bits = 0;
+    bool b_held = gamepad_button_b() > 0;
+    bool a_held = gamepad_button_a() > 0;
+
+    if( input_lock && !b_held && !a_held ) input_lock = false;
+    if( input_lock )
+    {
+        b_held = false;
+        a_held = false;
+    }
+
     if( gamepad_left() > 0 )  bits = bits | IN_LEFT;
     if( gamepad_right() > 0 ) bits = bits | IN_RIGHT;
-    if( gamepad_up() > 0 || gamepad_button_a() > 0 ) bits = bits | IN_THRUST;
-    if( gamepad_button_b() > 0 ) bits = bits | IN_FIRE;
+    if( gamepad_up() > 0 || a_held ) bits = bits | IN_THRUST;
+    if( b_held ) bits = bits | IN_FIRE;
     if( gamepad_button_x() > 0 ) bits = bits | IN_HYPER;
     if( gamepad_button_y() > 0 ) bits = bits | IN_SHIELD;
     return bits;
@@ -396,9 +411,12 @@ void load_builtin_demo()
     demo_score = builtin_demo_score;
 }
 
+bool options_from_pause = false;   // options screen opened from the pause menu
+
 bool in_game()
 {
-    return state == STATE_PLAYING || state == STATE_DEMO;
+    return state == STATE_PLAYING || state == STATE_DEMO
+           || ( state == STATE_OPTIONS && options_from_pause );
 }
 
 // -----------------------------------------------------------------------------
@@ -1507,6 +1525,15 @@ void leave_options()
     // keep the settings on the card (if it is ours or blank)
     refresh_card();
     if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+
+    if( options_from_pause )
+    {
+        // back to the pause menu, game still frozen
+        options_from_pause = false;
+        enter_state( STATE_PLAYING );
+        return;
+    }
+
     enter_title();
 }
 
@@ -2148,21 +2175,99 @@ void update_beat()
     }
 }
 
+// -----------------------------------------------------------------------------
+//   PAUSE MENU
+// -----------------------------------------------------------------------------
+
+#define PAUSE_RESUME   0
+#define PAUSE_OPTIONS  1
+#define PAUSE_QUIT     2
+
+int pause_cursor = 0;
+bool pause_confirm_quit = false;
+
+void pause_game()
+{
+    paused = true;
+    pause_cursor = PAUSE_RESUME;
+    pause_confirm_quit = false;
+
+    // pause everything first, so the chime itself still plays
+    pause_all_channels();
+    sfx( SND_PAUSE, 0.6 );
+}
+
+void resume_game()
+{
+    paused = false;
+    resume_all_channels();
+    sfx( SND_PAUSE, 0.6 );
+    input_lock = true;
+}
+
+void update_pause_menu()
+{
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        pause_cursor--;
+        if( pause_cursor < 0 ) pause_cursor = PAUSE_QUIT;
+        pause_confirm_quit = false;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        pause_cursor++;
+        if( pause_cursor > PAUSE_QUIT ) pause_cursor = PAUSE_RESUME;
+        pause_confirm_quit = false;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( gamepad_button_start() == 1 )
+    {
+        resume_game();
+        return;
+    }
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( pause_cursor == PAUSE_RESUME ) resume_game();
+        else if( pause_cursor == PAUSE_OPTIONS )
+        {
+            options_from_pause = true;
+            enter_options();
+        }
+        else if( !pause_confirm_quit )
+        {
+            pause_confirm_quit = true;
+            sfx( SND_ARMOR, 0.5 );
+        }
+        else
+        {
+            // abandon the game: no score is kept and it never becomes the demo
+            paused = false;
+            enter_title();
+        }
+    }
+}
+
 void update_playing()
 {
     int bits;
 
-    if( !demo_mode && gamepad_button_start() == 1 )
+    if( !demo_mode )
     {
-        paused = !paused;
-
-        // pause everything first, so the chime itself still plays
-        if( paused ) pause_all_channels();
-        else resume_all_channels();
-        sfx( SND_PAUSE, 0.6 );
+        if( paused )
+        {
+            update_pause_menu();
+            if( paused || state != STATE_PLAYING ) return;
+        }
+        else if( gamepad_button_start() == 1 )
+        {
+            pause_game();
+            return;
+        }
     }
-
-    if( paused ) return;
 
     // this logic frame's input: replayed, or read live and recorded
     if( demo_mode )
@@ -2436,6 +2541,40 @@ void draw_world()
     world_intensity( 1 );
 }
 
+void draw_pause_menu()
+{
+    int i;
+    float y, x;
+    int* label;
+
+    for( i = 0; i <= PAUSE_QUIT; i++ )
+    {
+        y = 170 + i * 30;
+        label = "RESUME";
+        if( i == PAUSE_OPTIONS ) label = "OPTIONS";
+        if( i == PAUSE_QUIT ) label = "QUIT TO TITLE";
+        if( i == PAUSE_QUIT && pause_confirm_quit ) label = "PRESS B AGAIN TO QUIT";
+
+        vec_thickness( 2 );
+        vec_glow_size( 14 );
+        if( i == pause_cursor )
+        {
+            if( i == PAUSE_QUIT && pause_confirm_quit ) vec_color( 0xFF8080FF, 0xFF202070 );
+            else vec_color( 0xFFFFFF60, 0xFF606020 );
+            x = 320 - vec_text_width( label, 7 ) / 2 - 20 + 3 * sin( frame * 0.2 );
+            vec_line( x, y + 1, x + 9, y + 7 );
+            vec_line( x, y + 13, x + 9, y + 7 );
+        }
+        else vec_color( DIM_TEXT, 0 );
+
+        vec_text_centered( label, 320, y, 7 );
+    }
+
+    vec_thickness( 1.2 );
+    vec_color( DIM_TEXT, 0 );
+    vec_text_centered( "UP DOWN SELECT   B CHOOSE   START RESUME", 320, 280, 4.2 );
+}
+
 void draw_hud()
 {
     int i;
@@ -2513,7 +2652,8 @@ void draw_hud()
         vec_thickness( 3 );
         vec_glow_size( 20 );
         vec_color( TEXT_CORE, TEXT_GLOW );
-        vec_text_centered( "PAUSED", 320, 150, 16 );
+        vec_text_centered( "PAUSED", 320, 112, 16 );
+        draw_pause_menu();
     }
 }
 
@@ -2575,6 +2715,10 @@ void draw_title()
     vec_number( high_score, 230 + vec_text_width( "HIGH SCORE ", 6 ), 320, 6 );
 
     draw_card_status();
+
+    vec_thickness( 1 );
+    vec_color( 0xFF806868, 0 );
+    vec_text( ROCKFIELD_VERSION, 596, 344, 3.5 );
 
     vec_intensity( 1 );
 }
@@ -3016,7 +3160,7 @@ void main()
         }
         else if( state == STATE_OPTIONS )
         {
-            update_world();
+            if( !options_from_pause ) update_world();
             update_options();
         }
         else
