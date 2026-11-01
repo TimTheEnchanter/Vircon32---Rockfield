@@ -15,6 +15,33 @@
 
 On the initials entry screen, Up and Down change the letter, Left and Right move between letters, B moves on to the next letter, and Start finishes. Entry confirms by itself after 30 seconds.
 
+## Options
+
+Press Y on the title screen. Up and Down select a setting, Left and Right change it, and Start (or Back) returns to the title.
+
+| Option | What it does |
+|---|---|
+| Music volume / Effects volume | 0–10. Takes effect immediately, and the effects slider plays a sample sound. |
+| Difficulty | Easy, Normal or Hard (see below). |
+| Screen shake | On or off. |
+| Screen flashes | On or off. Turns off the full-screen flashes from deaths, pickups and hyperspace. |
+| Reset high scores | Press B twice. Restores the default table and the built-in demo. |
+
+The difficulty settings:
+
+| | Easy | Normal | Hard |
+|---|---|---|---|
+| Lives | 5 | 3 | 2 |
+| Rock speed | ×0.8 | ×1 | ×1.2 |
+| Power-up drops | ×2 | ×1 | ×0.5 |
+| Saucers | Appear later, aim worse; small ones from 5000 points | Standard | Appear sooner, aim better; small ones from 1500 points |
+| Large rocks split in three from wave | 4 | 3 | 2 |
+| Armored rocks from wave | 5 | 4 | 3 |
+
+High score entries remember their difficulty. Easy scores show a small green **E** in the table, and Hard scores a red **H**. A recorded demo also remembers its difficulty, so it replays under the same rules.
+
+Options are saved to the memory card when you leave the options screen, and loaded with the card.
+
 ## Shield, power-ups and waves
 
 **Shield.** Hold Y to raise it. While it's up:
@@ -111,10 +138,13 @@ Card layout, in 32-bit words:
 | 0–19 | Game signature |
 | 20 | Format version (3) |
 | 21–25 | Table scores |
-| 26–30 | Table initials (3 characters packed, 8 bits each) |
+| 26–30 | Table initials (3 characters packed, 8 bits each, plus the difficulty in the top byte) |
 | 31–33 | Demo seed, demo length in frames, demo score |
 | 34 | Checksum of words 21–33 |
 | 35 | Checksum of the demo data |
+| 36 | Options (music, effects, difficulty, shake and flash, packed) |
+| 37 | Checksum of words 36 and 38 |
+| 38 | Difficulty the demo was played on |
 | 40–759 | Demo recording |
 
 ## Files

@@ -79,6 +79,34 @@ bool saucer_sound_on = false;
 bool shield_sound_on = false;
 bool sfx_muted = false;        // attract demo: effects off, music stays
 
+// player options (saved on the memory card)
+#define DIFF_NORMAL  0
+#define DIFF_EASY    1
+#define DIFF_HARD    2
+int opt_music = 10;            // 0-10
+int opt_sfx = 10;              // 0-10
+int opt_difficulty = DIFF_NORMAL;
+bool opt_shake = true;
+bool opt_flash = true;
+
+float music_base = 0.6;        // volume the current track asked for
+
+float sfx_level()
+{
+    return opt_sfx / 10.0;
+}
+
+void play_track( int track, float volume )
+{
+    music_base = volume;
+    music_play( track, volume * opt_music / 10.0 );
+}
+
+void apply_music_volume()
+{
+    music_set_volume( music_base * opt_music / 10.0 );
+}
+
 // one-shot effect on the next channel in rotation (2..15)
 void sfx_pitched( int sound_id, float volume, float speed )
 {
@@ -88,7 +116,7 @@ void sfx_pitched( int sound_id, float volume, float speed )
     // channel would replay whatever it played last
     stop_channel( next_sfx_channel );
     select_channel( next_sfx_channel );
-    set_channel_volume( volume );
+    set_channel_volume( volume * sfx_level() );
     set_channel_speed( speed );
     play_sound_in_channel( sound_id, next_sfx_channel );
 
@@ -111,7 +139,7 @@ void set_thrust_sound( bool on )
     if( on )
     {
         select_channel( CH_THRUST );
-        set_channel_volume( 0.7 );
+        set_channel_volume( 0.7 * sfx_level() );
         play_sound_in_channel( SND_THRUST, CH_THRUST );
     }
     else stop_channel( CH_THRUST );
@@ -126,7 +154,7 @@ void set_saucer_sound( bool on, bool small )
     if( on )
     {
         select_channel( CH_SAUCER );
-        set_channel_volume( 0.6 );
+        set_channel_volume( 0.6 * sfx_level() );
         if( small ) play_sound_in_channel( SND_SAUCER_SMALL, CH_SAUCER );
         else        play_sound_in_channel( SND_SAUCER_BIG, CH_SAUCER );
     }
@@ -142,7 +170,7 @@ void set_shield_sound( bool on )
     if( on )
     {
         select_channel( CH_SHIELD );
-        set_channel_volume( 0.6 );
+        set_channel_volume( 0.6 * sfx_level() );
         play_sound_in_channel( SND_SHIELD, CH_SHIELD );
     }
     else stop_channel( CH_SHIELD );
@@ -237,6 +265,27 @@ float wrap( float v, float limit )
 #define STATE_GAMEOVER  2
 #define STATE_DEMO      3     // attract mode: replaying a recorded game
 #define STATE_ENTRY     4     // entering initials for the high score table
+#define STATE_OPTIONS   5
+
+// difficulty of the game being played (a demo uses the one it was recorded on)
+int game_difficulty = DIFF_NORMAL;
+
+int diff_pick( int easy, int normal, int hard )
+{
+    if( game_difficulty == DIFF_EASY ) return easy;
+    if( game_difficulty == DIFF_HARD ) return hard;
+    return normal;
+}
+
+float diff_pickf( float easy, float normal, float hard )
+{
+    if( game_difficulty == DIFF_EASY ) return easy;
+    if( game_difficulty == DIFF_HARD ) return hard;
+    return normal;
+}
+
+int diff_split_wave()  { return diff_pick( 4, 3, 2 ); }     // large rocks split in three
+int diff_armor_wave()  { return diff_pick( 5, 4, 3 ); }     // armored rocks appear
 
 int state = STATE_TITLE;
 int state_timer = 0;
@@ -297,6 +346,7 @@ int demo_pos = 0;
 int demo_seed = 0;             // the demo: best game recorded so far
 int demo_frames = 0;
 int demo_score = 0;
+int demo_difficulty = DIFF_NORMAL;
 int[ REC_WORDS ] demo_data;
 
 int read_gamepad_bits()
@@ -341,6 +391,7 @@ void load_builtin_demo()
     if( builtin_demo_frames <= 0 ) return;
     memcpy( demo_data, builtin_demo_data, REC_WORDS );
     demo_seed = builtin_demo_seed;
+    demo_difficulty = DIFF_NORMAL;
     demo_frames = builtin_demo_frames;
     demo_score = builtin_demo_score;
 }
@@ -374,6 +425,11 @@ void unpack_name( int name, int* text )
 
 void init_table()
 {
+    hs_score[ 0 ] = 5000;
+    hs_score[ 1 ] = 4000;
+    hs_score[ 2 ] = 3000;
+    hs_score[ 3 ] = 2000;
+    hs_score[ 4 ] = 1000;
     hs_name[ 0 ] = pack_name( "VEC" );
     hs_name[ 1 ] = pack_name( "TOR" );
     hs_name[ 2 ] = pack_name( "ROK" );
@@ -425,11 +481,13 @@ int flash_color = 0xFFFFFFFF;
 
 void add_shake( float amount )
 {
+    if( !opt_shake ) return;
     if( amount > shake ) shake = amount;
 }
 
 void add_flash( float amount, int color )
 {
+    if( !opt_flash ) return;
     if( amount > flash )
     {
         flash = amount;
@@ -449,6 +507,9 @@ void add_flash( float amount, int color )
 //     31-33  demo seed, length in frames, score
 //     34     checksum of words 21-33
 //     35     checksum of the demo data
+//     36     options (music | sfx << 4 | difficulty << 8 | shake << 10 | flash << 11 | 1 << 12)
+//     37     checksum of words 36 and 38
+//     38     difficulty the demo was played on
 //     40-    demo recording (REC_WORDS words)
 //   A card belonging to another game is never written to.
 
@@ -468,6 +529,36 @@ int card_state = CARD_NONE;
 bool card_loaded = false;      // loaded the card currently inserted
 int save_message = 0;          // what to tell the player after a game
 int[ SAVE_HEADER ] save_header;
+int[ 3 ] save_extra;
+#define SAVE_EXTRA_AT   36
+
+int checksum( int* data, int count );
+
+int pack_options()
+{
+    int f = 0, h = 0;
+    if( opt_shake ) f = 1;
+    if( opt_flash ) h = 1;
+    return opt_music | ( opt_sfx << 4 ) | ( opt_difficulty << 8 ) | ( f << 10 ) | ( h << 11 ) | ( 1 << 12 );
+}
+
+void unpack_options( int word )
+{
+    opt_music = min( word & 15, 10 );
+    opt_sfx = min( ( word >> 4 ) & 15, 10 );
+    opt_difficulty = ( word >> 8 ) & 3;
+    if( opt_difficulty > DIFF_HARD ) opt_difficulty = DIFF_NORMAL;
+    opt_shake = ( ( word >> 10 ) & 1 ) != 0;
+    opt_flash = ( ( word >> 11 ) & 1 ) != 0;
+}
+
+int extra_checksum()
+{
+    int[ 2 ] w;
+    w[ 0 ] = save_extra[ 0 ];
+    w[ 1 ] = save_extra[ 2 ];
+    return checksum( w, 2 );
+}
 int[ REC_WORDS ] card_demo;
 
 #define SAVE_MSG_NONE      0
@@ -493,6 +584,7 @@ void load_old_save()
 void load_save()
 {
     int i;
+    bool extra_ok;
 
     card_read_data( save_header, SAVE_OFFSET, SAVE_HEADER );
 
@@ -504,6 +596,15 @@ void load_save()
 
     if( save_header[ 0 ] != SAVE_VERSION && save_header[ 0 ] != 2 ) return;
     if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
+
+    // options and the demo's difficulty (absent on cards saved before options existed)
+    card_read_data( save_extra, SAVE_EXTRA_AT, 3 );
+    extra_ok = ( save_extra[ 1 ] == extra_checksum() && ( save_extra[ 0 ] & ( 1 << 12 ) ) );
+    if( extra_ok )
+    {
+        unpack_options( save_extra[ 0 ] );
+        apply_music_volume();
+    }
 
     for( i = 0; i < HS_COUNT; i++ )
       table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
@@ -521,6 +622,8 @@ void load_save()
             demo_seed = save_header[ 11 ];
             demo_frames = save_header[ 12 ];
             demo_score = save_header[ 13 ];
+            demo_difficulty = DIFF_NORMAL;
+            if( extra_ok ) demo_difficulty = save_extra[ 2 ] & 3;
         }
     }
 }
@@ -578,6 +681,11 @@ int save_all()
 
     card_write_data( demo_data, SAVE_DEMO_AT, REC_WORDS );
     card_write_data( save_header, SAVE_OFFSET, SAVE_HEADER );
+
+    save_extra[ 0 ] = pack_options();
+    save_extra[ 2 ] = demo_difficulty;
+    save_extra[ 1 ] = extra_checksum();
+    card_write_data( save_extra, SAVE_EXTRA_AT, 3 );
 
     card_state = CARD_OURS;
     return SAVE_MSG_SAVED;
@@ -664,7 +772,8 @@ int spawn_rock( float x, float y, int size, float speed_bonus )
       if( !rock_active[ i ] )
       {
           a = frand() * 6.2831853;
-          speed = frand_range( 0.4, 1.0 ) * ( 4 - size ) * 0.6 * ( 1.0 + speed_bonus );
+          speed = frand_range( 0.4, 1.0 ) * ( 4 - size ) * 0.6 * ( 1.0 + speed_bonus )
+                  * diff_pickf( 0.8, 1.0, 1.2 );
           rock_active[ i ] = true;
           rock_x[ i ] = wrap( x, screen_width );
           rock_y[ i ] = wrap( y, screen_height );
@@ -724,7 +833,7 @@ void spawn_wave_rocks( int amount )
         k = spawn_rock( x, y, 3, wave_speed_bonus() );
 
         // armored rocks from wave 4, more of them each wave
-        if( k >= 0 && level >= 4 && grand() % 100 < min( 15 * ( level - 3 ), 60 ) )
+        if( k >= 0 && level >= diff_armor_wave() && grand() % 100 < min( 15 * ( level - diff_armor_wave() + 1 ), 60 ) )
         {
             rock_hp[ k ] = 2;
             rock_armored[ k ] = true;
@@ -818,7 +927,7 @@ float saucer_size()
 
 void reset_saucer_timer()
 {
-    saucer_spawn_timer = 600 + grand() % 600 - level * 30;
+    saucer_spawn_timer = 600 + grand() % 600 - level * 30 + diff_pick( 300, 0, -150 );
     if( saucer_spawn_timer < 360 ) saucer_spawn_timer = 360;
 }
 
@@ -828,7 +937,7 @@ void spawn_saucer()
 
     // small saucers get more likely as the game goes on
     saucer_small = ( grand() % 100 ) < ( level * 12 + score / 500 );
-    if( score < 3000 ) saucer_small = false;
+    if( score < diff_pick( 5000, 3000, 1500 ) ) saucer_small = false;
 
     speed = 1.5;
     if( saucer_small ) speed = 2.1;
@@ -873,7 +982,7 @@ void saucer_fire()
               // aimed shot, more accurate in later waves
               dx = ship_x - saucer_x;
               dy = ship_y - saucer_y;
-              error = 0.5 - level * 0.06;
+              error = 0.5 - level * 0.06 + diff_pickf( 0.25, 0.0, -0.1 );
               if( error < 0.08 ) error = 0.08;
               a = atan2( dy, dx ) + frand_range( -error, error );
           }
@@ -1141,7 +1250,7 @@ void destroy_rock( int i, bool by_player )
         add_score( points, px, py );
 
         // occasional power-up drop, bigger rocks more likely
-        if( grand() % 100 < 1 + size * 2 ) spawn_pickup( px, py );
+        if( grand() % 100 < ( 1 + size * 2 ) * diff_pick( 200, 100, 50 ) / 100 ) spawn_pickup( px, py );
     }
 
     explode( rock_x[ i ], rock_y[ i ], 4 + size * 3, 1.0 + size * 0.5, 3 + size * 2, ROCK_CORE );
@@ -1166,7 +1275,7 @@ void destroy_rock( int i, bool by_player )
 
     // from wave 3, large rocks break into three
     pieces = 2;
-    if( size == 3 && level >= 3 ) pieces = 3;
+    if( size == 3 && level >= diff_split_wave() ) pieces = 3;
 
     if( size > 1 )
       for( k = 0; k < pieces; k++ )
@@ -1272,9 +1381,9 @@ void start_wave()
     wave_banner = 150;
 
     wave_rule_text = "";
-    if( level == 3 ) wave_rule_text = "NEW - LARGE ROCKS SPLIT IN THREE";
-    if( level == 4 ) wave_rule_text = "NEW - ARMORED ROCKS TAKE TWO HITS";
-    if( level >= 4 ) wave_banner = 190;
+    if( level == diff_split_wave() ) wave_rule_text = "NEW - LARGE ROCKS SPLIT IN THREE";
+    if( level == diff_armor_wave() ) wave_rule_text = "NEW - ARMORED ROCKS TAKE TWO HITS";
+    if( wave_rule_text[ 0 ] ) wave_banner = 190;
     beat_timer = 60;
 }
 
@@ -1283,6 +1392,8 @@ void start_wave()
 // -----------------------------------------------------------------------------
 
 void enter_title_page( int page );
+void enter_title();
+void load_builtin_demo();
 
 int* entry_charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ";
 #define ENTRY_CHARS 38
@@ -1316,7 +1427,8 @@ void finish_entry()
     name[ 2 ] = entry_charset[ entry_index[ 2 ] ];
     name[ 3 ] = 0;
 
-    table_insert( score, pack_name( name ), entry_rank );
+    // the difficulty goes in the name word's spare top byte
+    table_insert( score, pack_name( name ) | ( game_difficulty << 24 ), entry_rank );
     high_score = hs_score[ 0 ];
     save_message = save_all();
     sfx( SND_START, 0.6 );
@@ -1365,11 +1477,144 @@ void update_entry()
       finish_entry();
 }
 
+// -----------------------------------------------------------------------------
+//   OPTIONS SCREEN
+// -----------------------------------------------------------------------------
+
+#define OPT_MUSIC    0
+#define OPT_SFX      1
+#define OPT_DIFF     2
+#define OPT_SHAKE    3
+#define OPT_FLASH    4
+#define OPT_RESET    5
+#define OPT_BACK     6
+#define OPT_ROWS     7
+
+int opt_cursor = 0;
+bool opt_confirm_reset = false;
+int opt_note_timer = 0;          // shows "HIGH SCORES RESET" for a while
+
+void enter_options()
+{
+    opt_cursor = 0;
+    opt_confirm_reset = false;
+    opt_note_timer = 0;
+    enter_state( STATE_OPTIONS );
+}
+
+void leave_options()
+{
+    // keep the settings on the card (if it is ours or blank)
+    refresh_card();
+    if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+    enter_title();
+}
+
+void reset_high_scores()
+{
+    init_table();
+    demo_frames = 0;
+    demo_score = 0;
+    load_builtin_demo();
+    high_score = hs_score[ 0 ];
+    refresh_card();
+    if( card_state == CARD_OURS || card_state == CARD_EMPTY ) save_all();
+    opt_note_timer = 150;
+    sfx( SND_WAVE_CLEAR, 0.6 );
+}
+
+void update_options()
+{
+    int change = 0;
+
+    if( opt_note_timer > 0 ) opt_note_timer--;
+
+    if( pressed_or_repeat( gamepad_up() ) )
+    {
+        opt_cursor--;
+        if( opt_cursor < 0 ) opt_cursor = OPT_ROWS - 1;
+        opt_confirm_reset = false;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( pressed_or_repeat( gamepad_down() ) )
+    {
+        opt_cursor++;
+        if( opt_cursor >= OPT_ROWS ) opt_cursor = 0;
+        opt_confirm_reset = false;
+        sfx( SND_FIRE, 0.25 );
+    }
+
+    if( pressed_or_repeat( gamepad_left() ) ) change = -1;
+    if( pressed_or_repeat( gamepad_right() ) ) change = 1;
+
+    if( change != 0 )
+    {
+        if( opt_cursor == OPT_MUSIC )
+        {
+            opt_music = max( 0, min( 10, opt_music + change ) );
+            apply_music_volume();
+        }
+        else if( opt_cursor == OPT_SFX )
+        {
+            opt_sfx = max( 0, min( 10, opt_sfx + change ) );
+            sfx( SND_BANG_SMALL, 0.6 );          // hear the new level
+        }
+        else if( opt_cursor == OPT_DIFF )
+        {
+            opt_difficulty = opt_difficulty + change;
+            if( opt_difficulty < 0 ) opt_difficulty = DIFF_HARD;
+            if( opt_difficulty > DIFF_HARD ) opt_difficulty = DIFF_NORMAL;
+            sfx( SND_PAUSE, 0.5 );
+        }
+        else if( opt_cursor == OPT_SHAKE )
+        {
+            opt_shake = !opt_shake;
+            sfx( SND_PAUSE, 0.5 );
+            if( opt_shake ) add_shake( 6 );       // show what it does
+        }
+        else if( opt_cursor == OPT_FLASH )
+        {
+            opt_flash = !opt_flash;
+            sfx( SND_PAUSE, 0.5 );
+            if( opt_flash ) add_flash( 0.3, 0xFFFFE0C0 );
+        }
+    }
+
+    if( gamepad_button_b() == 1 || gamepad_button_a() == 1 )
+    {
+        if( opt_cursor == OPT_RESET )
+        {
+            if( !opt_confirm_reset )
+            {
+                opt_confirm_reset = true;
+                sfx( SND_ARMOR, 0.5 );
+            }
+            else
+            {
+                opt_confirm_reset = false;
+                reset_high_scores();
+            }
+        }
+        else if( opt_cursor == OPT_BACK )
+        {
+            leave_options();
+            return;
+        }
+    }
+
+    if( gamepad_button_start() == 1 || gamepad_button_y() == 1 )
+      leave_options();
+}
+
 // resets every piece of gameplay state, then seeds the gameplay RNG:
 // a live game and its replay must start out bit-for-bit identical
 void begin_game( int seed, bool demo )
 {
     int i;
+
+    game_difficulty = opt_difficulty;
+    if( demo ) game_difficulty = demo_difficulty;
 
     // forget the title screen's world without touching the RNG
     saucer_active = false;
@@ -1399,7 +1644,7 @@ void begin_game( int seed, bool demo )
     score = 0;
     new_high_score = false;
     high_score = hs_score[ 0 ];
-    lives = 3;
+    lives = diff_pick( 5, 3, 2 );
     level = 1;
     next_extra_life = 10000;
     next_wave_timer = 0;
@@ -1420,13 +1665,13 @@ void begin_game( int seed, bool demo )
     {
         // the attract demo plays without effects, over the title music
         sfx_muted = true;
-        music_play( MUSIC_TITLE, 0.6 );
+        play_track( MUSIC_TITLE, 0.6 );
         enter_state( STATE_DEMO );
     }
     else
     {
         sfx_muted = false;
-        music_play( MUSIC_GAME, 0.45 );
+        play_track( MUSIC_GAME, 0.45 );
         sfx( SND_START, 0.7 );
         enter_state( STATE_PLAYING );
     }
@@ -1449,7 +1694,7 @@ void enter_title_page( int page )
     stop_sfx_channels();
     sfx_muted = false;
     clear_pickups();
-    music_play( MUSIC_TITLE, 0.6 );
+    play_track( MUSIC_TITLE, 0.6 );
     demo_mode = false;
     level = 1;
     shake = 0;
@@ -1484,19 +1729,20 @@ void finish_game()
         demo_seed = game_seed;
         demo_frames = rec_frames;
         demo_score = score;
+        demo_difficulty = game_difficulty;
         demo_changed = true;
     }
 
     if( table_rank( score ) >= 0 )
     {
-        music_play( MUSIC_TITLE, 0.6 );
+        play_track( MUSIC_TITLE, 0.6 );
         start_entry();
         return;
     }
 
     save_message = SAVE_MSG_NONE;
     if( demo_changed ) save_message = save_all();
-    music_play( MUSIC_GAMEOVER, 0.7 );
+    play_track( MUSIC_GAMEOVER, 0.7 );
     enter_state( STATE_GAMEOVER );
 }
 
@@ -2315,6 +2561,11 @@ void draw_title()
 
     vec_thickness( 1.5 );
     vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0xFF603020 );
+    vec_text_centered( "Y  OPTIONS", 320, 224, 6 );
+
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
     vec_color( DIM_TEXT, 0 );
     vec_text_centered( "B FIRE   A THRUST   X HYPERSPACE   Y SHIELD", 320, 262, 5 );
     vec_text_centered( "START PAUSE", 320, 284, 5 );
@@ -2389,7 +2640,7 @@ void draw_card_status()
 
 void draw_scores_page()
 {
-    int i;
+    int i, k;
     float y, t;
     int[ 4 ] name;
     int[ 2 ] rank_text;
@@ -2436,6 +2687,16 @@ void draw_scores_page()
         unpack_name( hs_name[ i ], name );
         vec_text( name, 230, y, 9 );
         vec_number( hs_score[ i ], 460 - number_width( hs_score[ i ], 9 ), y, 9 );
+
+        // small tag for scores set on easy or hard
+        k = ( hs_name[ i ] >> 24 ) & 3;
+        if( k != DIFF_NORMAL )
+        {
+            vec_thickness( 1.5 );
+            vec_glow_size( 8 );
+            if( k == DIFF_EASY ) { vec_color( 0xFF90E090, 0 ); vec_char( 'E', 474, y + 6, 4 ); }
+            else                 { vec_color( 0xFF8080FF, 0 ); vec_char( 'H', 474, y + 6, 4 ); }
+        }
     }
 
     vec_intensity( t );
@@ -2551,6 +2812,127 @@ void draw_demo_overlay()
     vec_text_centered( "PRESS START", 320, 318, 8 );
 }
 
+// small left / right arrows around a selected value
+void draw_value_arrows( float x_left, float x_right, float y )
+{
+    vec_line( x_left, y + 6, x_left + 6, y );
+    vec_line( x_left, y + 6, x_left + 6, y + 12 );
+    vec_line( x_right, y + 6, x_right - 6, y );
+    vec_line( x_right, y + 6, x_right - 6, y + 12 );
+}
+
+void draw_options()
+{
+    int i, k, level;
+    float y, t, x;
+    bool selected;
+    int* value;
+
+    t = fmin( 1.0, state_timer / 25.0 );
+    vec_intensity( t );
+
+    vec_thickness( 3 );
+    vec_glow_size( 22 );
+    vec_color( 0xFFFFE0A0, 0xFF805020 );
+    vec_text_centered( "OPTIONS", 320, 24, 15 );
+
+    for( i = 0; i < OPT_ROWS; i++ )
+    {
+        y = 86 + i * 30;
+        if( i == OPT_RESET ) y += 10;
+        if( i == OPT_BACK ) y += 14;
+        selected = ( i == opt_cursor );
+
+        // label
+        vec_thickness( 1.8 );
+        vec_glow_size( 12 );
+        if( selected ) vec_color( 0xFFFFFF60, 0xFF606020 );
+        else vec_color( DIM_TEXT, 0 );
+
+        if( i == OPT_MUSIC ) vec_text( "MUSIC VOLUME", 110, y, 6 );
+        else if( i == OPT_SFX ) vec_text( "EFFECTS VOLUME", 110, y, 6 );
+        else if( i == OPT_DIFF ) vec_text( "DIFFICULTY", 110, y, 6 );
+        else if( i == OPT_SHAKE ) vec_text( "SCREEN SHAKE", 110, y, 6 );
+        else if( i == OPT_FLASH ) vec_text( "SCREEN FLASHES", 110, y, 6 );
+        else if( i == OPT_RESET ) vec_text( "RESET HIGH SCORES", 110, y, 6 );
+        else vec_text( "BACK", 110, y, 6 );
+
+        // cursor: a small pointer on the left
+        if( selected )
+        {
+            x = 92 + 3 * sin( frame * 0.2 );
+            vec_line( x, y + 1, x + 8, y + 6 );
+            vec_line( x, y + 11, x + 8, y + 6 );
+        }
+
+        // value
+        if( i == OPT_MUSIC || i == OPT_SFX )
+        {
+            level = opt_music;
+            if( i == OPT_SFX ) level = opt_sfx;
+            vec_thickness( 6 );
+            vec_glow_size( 12 );
+            for( k = 0; k < 10; k++ )
+            {
+                if( k < level ) vec_color( 0xFFFFE060, 0xFF806020 );
+                else vec_color( 0xFF503838, 0 );
+                vec_line( 380 + k * 14, y + 6, 389 + k * 14, y + 6 );
+            }
+        }
+        else if( i == OPT_DIFF || i == OPT_SHAKE || i == OPT_FLASH )
+        {
+            if( i == OPT_DIFF )
+            {
+                value = "NORMAL";
+                if( opt_difficulty == DIFF_EASY ) value = "EASY";
+                if( opt_difficulty == DIFF_HARD ) value = "HARD";
+            }
+            else
+            {
+                value = "OFF";
+                if( i == OPT_SHAKE && opt_shake ) value = "ON";
+                if( i == OPT_FLASH && opt_flash ) value = "ON";
+            }
+
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            if( selected ) vec_color( TEXT_CORE, TEXT_GLOW );
+            else vec_color( 0xFFE0D0D0, 0 );
+            vec_text_centered( value, 449, y, 6 );
+            if( selected ) draw_value_arrows( 384, 514, y );
+        }
+        else if( i == OPT_RESET && opt_confirm_reset && ( frame / 10 ) % 2 == 0 )
+        {
+            vec_thickness( 2 );
+            vec_glow_size( 14 );
+            vec_color( 0xFF8080FF, 0xFF202070 );
+            vec_text_centered( "PRESS B AGAIN", 449, y, 5 );
+        }
+    }
+
+    // what the selected difficulty means
+    vec_thickness( 1.5 );
+    vec_glow_size( 10 );
+    vec_color( 0xFFFFB090, 0 );
+    if( opt_cursor == OPT_DIFF )
+    {
+        if( opt_difficulty == DIFF_EASY )      vec_text_centered( "5 LIVES - SLOWER ROCKS - MORE POWER-UPS", 320, 316, 4.5 );
+        else if( opt_difficulty == DIFF_HARD ) vec_text_centered( "2 LIVES - FASTER ROCKS - SHARPER SAUCERS", 320, 316, 4.5 );
+        else                                   vec_text_centered( "3 LIVES - THE STANDARD GAME", 320, 316, 4.5 );
+    }
+    else if( opt_note_timer > 0 )
+    {
+        vec_color( 0xFF60FFFF, 0 );
+        vec_text_centered( "HIGH SCORES RESET", 320, 316, 5 );
+    }
+
+    vec_color( DIM_TEXT, 0 );
+    vec_thickness( 1.2 );
+    vec_text_centered( "UP DOWN SELECT   LEFT RIGHT CHANGE   START DONE", 320, 340, 4.2 );
+
+    vec_intensity( 1 );
+}
+
 void draw_flash()
 {
     if( flash > 0.01 )
@@ -2601,6 +2983,7 @@ void main()
             update_world();
 
             if( gamepad_button_start() == 1 && state_timer > 20 ) new_game();
+            else if( gamepad_button_y() == 1 && state_timer > 20 ) enter_options();
 
             // logo -> high scores -> demo -> logo ...
             else if( title_page == PAGE_LOGO && state_timer > 480 )
@@ -2631,13 +3014,18 @@ void main()
             update_world();
             update_entry();
         }
+        else if( state == STATE_OPTIONS )
+        {
+            update_world();
+            update_options();
+        }
         else
         {
             update_world();
 
             // once the game over jingle has finished, the title theme comes back softly
             if( !music_is_playing() )
-              music_play( MUSIC_TITLE, 0.45 );
+              play_track( MUSIC_TITLE, 0.45 );
 
             if( state_timer > 90 && gamepad_button_start() == 1 ) new_game();
             else if( state_timer > 900 ) enter_title();
@@ -2660,7 +3048,7 @@ void main()
         vec_offset( fx_range( -shake, shake ), fx_range( -shake, shake ) );
         world_dim = 1.0;
         if( paused ) world_dim = 0.35;
-        if( state == STATE_TITLE || state == STATE_ENTRY ) world_dim = 0.4;
+        if( state == STATE_TITLE || state == STATE_ENTRY || state == STATE_OPTIONS ) world_dim = 0.4;
         vec_intensity( world_dim );
         draw_stars();
         draw_world();
@@ -2673,6 +3061,7 @@ void main()
             else draw_scores_page();
         }
         else if( state == STATE_ENTRY ) draw_entry();
+        else if( state == STATE_OPTIONS ) draw_options();
         else
         {
             draw_hud();
