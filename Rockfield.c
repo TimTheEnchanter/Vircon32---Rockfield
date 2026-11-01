@@ -16,6 +16,8 @@
 #include "misc.h"
 #include "memcard.h"
 #include "vector.h"
+#include "music_data.h"
+#include "chipmusic.h"
 
 // -----------------------------------------------------------------------------
 //   COLORS  (Vircon32 colors are 0xAABBGGRR)
@@ -63,20 +65,28 @@
 #define SND_SHIELD         16
 #define SND_POWERUP        17
 #define SND_ARMOR          18
+#define SND_INSTRUMENTS    19     // 8 music instrument samples (see chipmusic.h)
 
 #define CH_THRUST     0
 #define CH_SAUCER     1
 #define CH_SHIELD     2
-#define CH_FIRST_SFX  3
+#define CH_MUSIC      3          // music uses channels 3-9 (MUSIC_VOICES)
+#define CH_FIRST_SFX  10
 
 int next_sfx_channel = CH_FIRST_SFX;
 bool thrust_sound_on = false;
 bool saucer_sound_on = false;
 bool shield_sound_on = false;
+bool sfx_muted = false;        // attract demo: effects off, music stays
 
 // one-shot effect on the next channel in rotation (2..15)
 void sfx_pitched( int sound_id, float volume, float speed )
 {
+    if( sfx_muted ) return;
+
+    // a channel only accepts a new sound once stopped; without this a busy
+    // channel would replay whatever it played last
+    stop_channel( next_sfx_channel );
     select_channel( next_sfx_channel );
     set_channel_volume( volume );
     set_channel_speed( speed );
@@ -94,6 +104,7 @@ void sfx( int sound_id, float volume )
 
 void set_thrust_sound( bool on )
 {
+    if( sfx_muted ) on = false;
     if( on == thrust_sound_on ) return;
     thrust_sound_on = on;
 
@@ -108,6 +119,7 @@ void set_thrust_sound( bool on )
 
 void set_saucer_sound( bool on, bool small )
 {
+    if( sfx_muted ) on = false;
     if( on == saucer_sound_on ) return;
     saucer_sound_on = on;
 
@@ -123,6 +135,7 @@ void set_saucer_sound( bool on, bool small )
 
 void set_shield_sound( bool on )
 {
+    if( sfx_muted ) on = false;
     if( on == shield_sound_on ) return;
     shield_sound_on = on;
 
@@ -133,6 +146,18 @@ void set_shield_sound( bool on )
         play_sound_in_channel( SND_SHIELD, CH_SHIELD );
     }
     else stop_channel( CH_SHIELD );
+}
+
+// stops every effect channel but leaves the music alone
+void stop_sfx_channels()
+{
+    int ch;
+    for( ch = 0; ch < sound_channels; ch++ )
+      if( ch < CH_MUSIC || ch >= CH_MUSIC + MUSIC_VOICES ) stop_channel( ch );
+
+    thrust_sound_on = false;
+    saucer_sound_on = false;
+    shield_sound_on = false;
 }
 
 void init_sounds()
@@ -1209,7 +1234,7 @@ void kill_ship()
     explode( ship_x, ship_y, 22, 3.0, 4, SPARK_CORE );
     spawn_ring( ship_x, ship_y, 90, 30, SHIP_CORE );
 
-    sfx( SND_SHIP_EXPLODE, 1.0 );
+    sfx( SND_SHIP_EXPLODE, 0.85 );
     add_shake( 14 );
     add_flash( 0.45, 0xFFFFE0C0 );
 
@@ -1393,12 +1418,15 @@ void begin_game( int seed, bool demo )
 
     if( demo )
     {
-        set_global_volume( 0 );        // the attract demo plays silently
+        // the attract demo plays without effects, over the title music
+        sfx_muted = true;
+        music_play( MUSIC_TITLE, 0.6 );
         enter_state( STATE_DEMO );
     }
     else
     {
-        set_global_volume( 0.85 );
+        sfx_muted = false;
+        music_play( MUSIC_GAME, 0.45 );
         sfx( SND_START, 0.7 );
         enter_state( STATE_PLAYING );
     }
@@ -1418,12 +1446,10 @@ void enter_title_page( int page )
     clear_rocks();
     clear_effects();
     if( saucer_active ) remove_saucer();
-    stop_all_channels();
-    thrust_sound_on = false;
-    saucer_sound_on = false;
-    shield_sound_on = false;
+    stop_sfx_channels();
+    sfx_muted = false;
     clear_pickups();
-    set_global_volume( 0.85 );
+    music_play( MUSIC_TITLE, 0.6 );
     demo_mode = false;
     level = 1;
     shake = 0;
@@ -1463,12 +1489,14 @@ void finish_game()
 
     if( table_rank( score ) >= 0 )
     {
+        music_play( MUSIC_TITLE, 0.6 );
         start_entry();
         return;
     }
 
     save_message = SAVE_MSG_NONE;
     if( demo_changed ) save_message = save_all();
+    music_play( MUSIC_GAMEOVER, 0.7 );
     enter_state( STATE_GAMEOVER );
 }
 
@@ -2541,7 +2569,8 @@ void main()
     srand( get_time() + 1 );
     vec_init( 0, 0 );
     init_sounds();
-    set_global_volume( 0.85 );
+    music_init( SND_INSTRUMENTS, CH_MUSIC );
+    set_global_volume( 0.72 );     // headroom: the sound chip does not clamp its mix
     select_gamepad( 0 );
     init_table();
     load_builtin_demo();
@@ -2605,6 +2634,11 @@ void main()
         else
         {
             update_world();
+
+            // once the game over jingle has finished, the title theme comes back softly
+            if( !music_is_playing() )
+              music_play( MUSIC_TITLE, 0.45 );
+
             if( state_timer > 90 && gamepad_button_start() == 1 ) new_game();
             else if( state_timer > 900 ) enter_title();
         }
@@ -2612,6 +2646,7 @@ void main()
         state_timer++;
         if( !paused )
         {
+            music_update();
             shake *= 0.86;
             flash *= 0.85;
         }

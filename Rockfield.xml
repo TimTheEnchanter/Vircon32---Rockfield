@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <rom-definition version="1.0">
-    <rom type="cartridge" title="Rockfield" version="1.2" />
+    <rom type="cartridge" title="Rockfield" version="1.4" />
     <binary path="obj/Rockfield.vbin" />
     <textures>
         <texture path="vector_lines.vtex" />
@@ -25,5 +25,13 @@
         <sound path="sounds/shield.vsnd" />
         <sound path="sounds/powerup.vsnd" />
         <sound path="sounds/armor.vsnd" />
+        <sound path="sounds/ins_pulse12.vsnd" />
+        <sound path="sounds/ins_pulse25.vsnd" />
+        <sound path="sounds/ins_pulse50.vsnd" />
+        <sound path="sounds/ins_triangle.vsnd" />
+        <sound path="sounds/drum_kick.vsnd" />
+        <sound path="sounds/drum_snare.vsnd" />
+        <sound path="sounds/drum_hat.vsnd" />
+        <sound path="sounds/drum_ohat.vsnd" />
     </sounds>
 </rom-definition>

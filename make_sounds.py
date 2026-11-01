@@ -156,7 +156,7 @@ def beat_low():
 
 
 def beat_high():
-    return beat(65)
+    return beat(73.4)     # D2: with A1 below, both heartbeat notes sit in D minor
 
 
 def hyperspace():
@@ -220,10 +220,21 @@ SOUNDS = [
     ("armor", armor),
 ]
 
+# music instruments come last (see make_music.py and chipmusic.h)
+from make_music import INSTRUMENTS, write_music_data
+SOUNDS += INSTRUMENTS
+
 
 def write(name, samples, outdir):
-    pcm = np.clip(samples * 32767, -32768, 32767).astype("<i2")
-    stereo = np.repeat(pcm, 2)
+    """samples: a mono array, or a (left, right) pair for stereo music"""
+    if isinstance(samples, tuple):
+        left, right = samples
+        pcm = np.clip(np.stack([left, right], axis=1) * 32767, -32768, 32767).astype("<i2")
+        stereo = pcm.reshape(-1)
+        pcm = pcm[:, 0]
+    else:
+        pcm = np.clip(samples * 32767, -32768, 32767).astype("<i2")
+        stereo = np.repeat(pcm, 2)
 
     with wave.open(os.path.join(outdir, name + ".wav"), "wb") as w:
         w.setnchannels(2)
@@ -238,9 +249,11 @@ def write(name, samples, outdir):
 
 
 if __name__ == "__main__":
+    write_music_data(os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_data.h"))
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
     os.makedirs(outdir, exist_ok=True)
     for i, (name, fn) in enumerate(SOUNDS):
         s = fn()
         write(name, s, outdir)
-        print(f"{i:2d} {name:14s} {len(s) / RATE:.2f}s")
+        n = len(s[0]) if isinstance(s, tuple) else len(s)
+        print(f"{i:2d} {name:14s} {n / RATE:.2f}s")
