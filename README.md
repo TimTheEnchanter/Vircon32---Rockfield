@@ -10,9 +10,37 @@
 | Up or A | Thrust |
 | B | Fire (hold for auto-fire) |
 | X | Hyperspace |
+| Y | Shield (hold) |
 | Start | Start game / pause |
 
 On the initials entry screen, Up and Down change the letter, Left and Right move between letters, B moves on to the next letter, and Start finishes. Entry confirms by itself after 30 seconds.
+
+## Shield, power-ups and waves
+
+**Shield.** Hold Y to raise it. While it's up:
+
+- rocks you touch are destroyed;
+- saucer shots are absorbed;
+- saucers that ram you are destroyed.
+
+Each of these costs energy. Holding the shield drains about 5 seconds' worth of energy, and the meter under your lives recharges while the shield is down. You start each life with a full meter.
+
+**Power-ups** drop now and then from rocks you destroy, and always from saucers. They drift around for 10 seconds, blinking before they fade out. Fly into one to collect it:
+
+| Icon | Effect |
+|---|---|
+| Pink `3` | Spread shot: three bullets per shot, for 12 seconds |
+| Yellow `R` | Rapid fire, for 12 seconds |
+| Cyan `E` | Refills the shield |
+
+Active power-ups show under the shield meter, with bars that shrink as they run out. You lose them when your ship is destroyed.
+
+**Waves get harder.** Rocks get a little faster every wave. Two rules are added along the way, and each is announced under the wave banner the first time it applies:
+
+| From wave | New rule |
+|---|---|
+| 3 | Large rocks split into three pieces instead of two |
+| 4 | Armored rocks appear. They're drawn with an inner plate, take two hits, and are worth double. Their share of each wave grows, up to 60% |
 
 ## Attract mode
 
@@ -24,7 +52,7 @@ When nobody is playing, the title screen cycles between three pages:
 
 Pressing Start at any point begins a real game.
 
-The demo is a replay of real inputs, not a scripted animation. Every game records its inputs (5 bits per frame, the first 60 seconds), and the game logic uses its own random number generator, seeded at the start of each game. Replaying the same seed and inputs reproduces the game exactly.
+The demo is a replay of real inputs, not a scripted animation. Every game records its inputs (6 bits per frame, the first 60 seconds), and the game logic uses its own random number generator, seeded at the start of each game. Replaying the same seed and inputs reproduces the game exactly.
 
 A finished game becomes the new demo if it beats the current demo's score and lasted at least 10 seconds. Until then, a built-in demo (`demo_builtin.h`) is used.
 
@@ -36,20 +64,22 @@ Insert a memory card and Rockfield saves its top five table and the demo recordi
 - A card that already belongs to another game is never written to.
 - The table and the demo each have their own checksum. A damaged part is ignored and the defaults are used instead.
 - A card inserted while the title screen is showing is picked up straight away. Its scores are merged into the current table, and its demo is used if it's a better game.
-- Cards saved by the previous version (a single high score) still load. That score enters the table under the initials `---`.
+- Cards saved by earlier versions still load:
+  - **Format 2:** the table is kept. Its demo is dropped, because it was recorded under the old rules and wouldn't replay correctly.
+  - **Format 1:** that version saved a single high score, which enters the table under the initials `---`.
 
 Card layout, in 32-bit words:
 
 | Words | Contents |
 |---|---|
 | 0–19 | Game signature |
-| 20 | Format version (2) |
+| 20 | Format version (3) |
 | 21–25 | Table scores |
 | 26–30 | Table initials (3 characters packed, 8 bits each) |
 | 31–33 | Demo seed, demo length in frames, demo score |
 | 34 | Checksum of words 21–33 |
 | 35 | Checksum of the demo data |
-| 40–639 | Demo recording |
+| 40–759 | Demo recording |
 
 ## Files
 

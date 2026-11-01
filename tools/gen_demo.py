@@ -4,7 +4,7 @@ Plays several scripted games in the headless emulator and turns the
 best recording (as saved on the memory card) into demo_builtin.h."""
 import random, struct, subprocess, os, sys
 H=os.environ.get('HEADLESS','./headless'); BIOS=os.environ.get('BIOS','StandardBios.v32')
-REC_WORDS=600
+REC_WORDS=720
 
 def script(seed):
     r=random.Random(seed); L=[(460,464,4)]; f=520
@@ -13,6 +13,7 @@ def script(seed):
         if r.random()<0.6: L.append((f,f+r.randint(5,16),r.choice([0,1])))   # turn
         if r.random()<0.12: L.append((f,f+r.randint(8,20),2))                # thrust
         if r.random()<0.01: L.append((f,f+2,7))                              # hyperspace
+        if r.random()<0.04: L.append((f,f+r.randint(30,70),8))               # shield
         f+=r.randint(8,15)
     return '\n'.join('%d %d %d'%x for x in L)
 

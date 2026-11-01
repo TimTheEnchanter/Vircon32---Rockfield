@@ -25,6 +25,8 @@
 #define SHIP_GLOW      0xFFB07020
 #define ROCK_CORE      0xFFF0D8E8
 #define ROCK_GLOW      0xFF904870
+#define ARMOR_CORE     0xFFFFD8A0
+#define ARMOR_GLOW     0xFF805030
 #define BULLET_CORE    0xFFA0FFFF
 #define BULLET_GLOW    0xFF2090A0
 #define SAUCER_CORE    0xFF80FF90
@@ -58,14 +60,19 @@
 #define SND_START          13
 #define SND_WAVE_CLEAR     14
 #define SND_PAUSE          15
+#define SND_SHIELD         16
+#define SND_POWERUP        17
+#define SND_ARMOR          18
 
 #define CH_THRUST     0
 #define CH_SAUCER     1
-#define CH_FIRST_SFX  2
+#define CH_SHIELD     2
+#define CH_FIRST_SFX  3
 
 int next_sfx_channel = CH_FIRST_SFX;
 bool thrust_sound_on = false;
 bool saucer_sound_on = false;
+bool shield_sound_on = false;
 
 // one-shot effect on the next channel in rotation (2..15)
 void sfx_pitched( int sound_id, float volume, float speed )
@@ -114,8 +121,23 @@ void set_saucer_sound( bool on, bool small )
     else stop_channel( CH_SAUCER );
 }
 
+void set_shield_sound( bool on )
+{
+    if( on == shield_sound_on ) return;
+    shield_sound_on = on;
+
+    if( on )
+    {
+        select_channel( CH_SHIELD );
+        set_channel_volume( 0.6 );
+        play_sound_in_channel( SND_SHIELD, CH_SHIELD );
+    }
+    else stop_channel( CH_SHIELD );
+}
+
 void init_sounds()
 {
+    select_sound( SND_SHIELD );       set_sound_loop( true );
     select_sound( SND_THRUST );       set_sound_loop( true );
     select_sound( SND_SAUCER_BIG );   set_sound_loop( true );
     select_sound( SND_SAUCER_SMALL ); set_sound_loop( true );
@@ -206,6 +228,7 @@ int level;
 int next_extra_life;
 int wave_frames;
 int wave_banner;
+int* wave_rule_text = "";
 int next_wave_timer;
 int beat_timer;
 bool beat_high;
@@ -220,7 +243,7 @@ int highlight_rank = -1;       // table row to highlight after entering initials
 //   INPUT (live or replayed) AND RECORDING
 // -----------------------------------------------------------------------------
 //   Game logic never reads the gamepad directly: each logic frame gets a
-//   5-bit input word, either from the gamepad (and recorded) or from a
+//   6-bit input word, either from the gamepad (and recorded) or from a
 //   recording (demo). With the same seed and inputs the game replays exactly.
 
 #define IN_LEFT    1
@@ -228,9 +251,10 @@ int highlight_rank = -1;       // table row to highlight after entering initials
 #define IN_THRUST  4
 #define IN_FIRE    8
 #define IN_HYPER   16
+#define IN_SHIELD  32
 
 #define REC_MAX_FRAMES  3600      // 60 s of gameplay
-#define REC_WORDS       600       // 6 frames of 5 bits packed per word
+#define REC_WORDS       720       // 5 frames of 6 bits packed per word
 #define DEMO_MAX_PLAY   2700      // attract demo runs 45 s at most
 #define DEMO_MIN_FRAMES 600       // shorter games never become the demo
 
@@ -258,19 +282,20 @@ int read_gamepad_bits()
     if( gamepad_up() > 0 || gamepad_button_a() > 0 ) bits = bits | IN_THRUST;
     if( gamepad_button_b() > 0 ) bits = bits | IN_FIRE;
     if( gamepad_button_x() > 0 ) bits = bits | IN_HYPER;
+    if( gamepad_button_y() > 0 ) bits = bits | IN_SHIELD;
     return bits;
 }
 
 void rec_add( int bits )
 {
     if( rec_frames >= REC_MAX_FRAMES ) return;
-    rec_data[ rec_frames / 6 ] = rec_data[ rec_frames / 6 ] | ( bits << ( ( rec_frames % 6 ) * 5 ) );
+    rec_data[ rec_frames / 5 ] = rec_data[ rec_frames / 5 ] | ( bits << ( ( rec_frames % 5 ) * 6 ) );
     rec_frames++;
 }
 
 int rec_get( int* data, int position )
 {
-    return ( data[ position / 6 ] >> ( ( position % 6 ) * 5 ) ) & 31;
+    return ( data[ position / 5 ] >> ( ( position % 5 ) * 6 ) ) & 63;
 }
 
 void apply_input( int bits )
@@ -393,7 +418,8 @@ void add_flash( float amount, int color )
 // -----------------------------------------------------------------------------
 //   Card layout (word offsets):
 //     0-19   game signature (every Vircon32 game that saves writes one)
-//     20     format version (2; version 1 held a single high score)
+//     20     format version (3; 2 had the same layout but recorded games
+//            from older rules, so only its table is kept; 1 held one score)
 //     21-25  table scores           26-30  table names
 //     31-33  demo seed, length in frames, score
 //     34     checksum of words 21-33
@@ -409,7 +435,7 @@ void add_flash( float amount, int color )
 #define SAVE_OFFSET     20
 #define SAVE_HEADER     16
 #define SAVE_DEMO_AT    40
-#define SAVE_VERSION    2
+#define SAVE_VERSION    3
 #define SAVE_KEY        0x5F3A9C17
 
 int* save_signature_text = "ROCKFIELD VECTOR V1 ";   // exactly 20 characters
@@ -451,11 +477,14 @@ void load_save()
         return;
     }
 
-    if( save_header[ 0 ] != SAVE_VERSION ) return;
+    if( save_header[ 0 ] != SAVE_VERSION && save_header[ 0 ] != 2 ) return;
     if( save_header[ 14 ] != checksum( &save_header[ 1 ], 13 ) ) return;
 
     for( i = 0; i < HS_COUNT; i++ )
       table_merge( save_header[ 1 + i ], save_header[ 6 + i ] );
+
+    // a version 2 demo was recorded under older rules: it would not replay
+    if( save_header[ 0 ] == 2 ) return;
 
     // take the card's demo if it is a better game than ours
     if( save_header[ 13 ] > demo_score && save_header[ 12 ] > 0 && save_header[ 12 ] <= REC_MAX_FRAMES )
@@ -544,6 +573,17 @@ int ship_invulnerable;
 int ship_hyperspace;
 int fire_cooldown;
 
+// shield: hold Y; drains while up, recharges while down
+#define SHIELD_MAX       300.0     // 5 seconds of continuous use
+#define SHIELD_RADIUS    21
+float shield_energy;
+bool shield_up;
+
+// power-up effects (frames left)
+#define POWER_TIME       720       // 12 seconds
+int spread_timer;
+int rapid_timer;
+
 // -----------------------------------------------------------------------------
 //   ROCKS
 // -----------------------------------------------------------------------------
@@ -565,6 +605,8 @@ float[ MAX_ROCKS ] rock_spin;
 int[ MAX_ROCKS ] rock_size;      // 3 = large, 2 = medium, 1 = small
 int[ MAX_ROCKS ] rock_shape;
 int[ MAX_ROCKS ] rock_flash;     // frames left drawn bright (after splitting)
+int[ MAX_ROCKS ] rock_hp;        // hits left: armored rocks start with 2
+bool[ MAX_ROCKS ] rock_armored;  // worth double, drawn with plating
 
 float rock_radius( int size )
 {
@@ -608,6 +650,8 @@ int spawn_rock( float x, float y, int size, float speed_bonus )
           rock_size[ i ] = size;
           rock_shape[ i ] = grand() % ROCK_SHAPES;
           rock_flash[ i ] = 0;
+          rock_hp[ i ] = 1;
+          rock_armored[ i ] = false;
           return i;
       }
 
@@ -629,9 +673,14 @@ void clear_rocks()
 }
 
 // large rocks along the edges, away from the centre
+float wave_speed_bonus()
+{
+    return fmin( ( level - 1 ) * 0.08, 0.8 );
+}
+
 void spawn_wave_rocks( int amount )
 {
-    int i;
+    int i, k;
     float x, y;
 
     for( i = 0; i < amount; i++ )
@@ -647,7 +696,14 @@ void spawn_wave_rocks( int amount )
             y = frand() * screen_height;
         }
 
-        spawn_rock( x, y, 3, ( level - 1 ) * 0.08 );
+        k = spawn_rock( x, y, 3, wave_speed_bonus() );
+
+        // armored rocks from wave 4, more of them each wave
+        if( k >= 0 && level >= 4 && grand() % 100 < min( 15 * ( level - 3 ), 60 ) )
+        {
+            rock_hp[ k ] = 2;
+            rock_armored[ k ] = true;
+        }
     }
 }
 
@@ -655,7 +711,7 @@ void spawn_wave_rocks( int amount )
 //   PLAYER BULLETS
 // -----------------------------------------------------------------------------
 
-#define MAX_BULLETS 8
+#define MAX_BULLETS 16
 
 int[ MAX_BULLETS ] bullet_life;
 float[ MAX_BULLETS ] bullet_x;
@@ -663,10 +719,18 @@ float[ MAX_BULLETS ] bullet_y;
 float[ MAX_BULLETS ] bullet_vx;
 float[ MAX_BULLETS ] bullet_vy;
 
-void fire_bullet()
+int count_bullets()
+{
+    int i, n = 0;
+    for( i = 0; i < MAX_BULLETS; i++ )
+      if( bullet_life[ i ] > 0 ) n++;
+    return n;
+}
+
+void fire_one_bullet( float angle )
 {
     int i;
-    float c = cos( ship_angle ), s = sin( ship_angle );
+    float c = cos( angle ), s = sin( angle );
 
     for( i = 0; i < MAX_BULLETS; i++ )
       if( bullet_life[ i ] <= 0 )
@@ -676,9 +740,24 @@ void fire_bullet()
           bullet_y[ i ] = ship_y + s * 14;
           bullet_vx[ i ] = ship_vx + c * 7.0;
           bullet_vy[ i ] = ship_vy + s * 7.0;
-          sfx_pitched( SND_FIRE, 0.5, frand_range( 0.95, 1.05 ) );
           return;
       }
+}
+
+void fire_bullet()
+{
+    // 8 bullets on screen normally; power-ups lift the limit
+    if( spread_timer == 0 && rapid_timer == 0 && count_bullets() >= 8 ) return;
+
+    fire_one_bullet( ship_angle );
+
+    if( spread_timer > 0 )
+    {
+        fire_one_bullet( ship_angle - 0.2 );
+        fire_one_bullet( ship_angle + 0.2 );
+    }
+
+    sfx_pitched( SND_FIRE, 0.5, frand_range( 0.95, 1.05 ) );
 }
 
 // -----------------------------------------------------------------------------
@@ -893,6 +972,105 @@ void clear_effects()
 }
 
 // -----------------------------------------------------------------------------
+//   POWER-UP PICKUPS
+// -----------------------------------------------------------------------------
+
+#define PU_SPREAD   0
+#define PU_RAPID    1
+#define PU_ENERGY   2
+
+#define MAX_PICKUPS 3
+
+float[ 4 ] pickup_shape_x = { 1, 0, -1, 0 };
+float[ 4 ] pickup_shape_y = { 0, 1, 0, -1 };
+#define PICKUP_LIFE 600            // 10 seconds before it fades away
+
+bool[ MAX_PICKUPS ] pickup_active;
+int[ MAX_PICKUPS ] pickup_type;
+int[ MAX_PICKUPS ] pickup_life;
+float[ MAX_PICKUPS ] pickup_x;
+float[ MAX_PICKUPS ] pickup_y;
+float[ MAX_PICKUPS ] pickup_vx;
+float[ MAX_PICKUPS ] pickup_vy;
+
+void clear_pickups()
+{
+    int i;
+    for( i = 0; i < MAX_PICKUPS; i++ ) pickup_active[ i ] = false;
+}
+
+void spawn_pickup( float x, float y )
+{
+    int i, roll;
+    float a;
+
+    for( i = 0; i < MAX_PICKUPS; i++ )
+      if( !pickup_active[ i ] )
+      {
+          roll = grand() % 100;
+          pickup_type[ i ] = PU_ENERGY;
+          if( roll < 40 ) pickup_type[ i ] = PU_SPREAD;
+          else if( roll < 80 ) pickup_type[ i ] = PU_RAPID;
+
+          a = frand() * 6.2831853;
+          pickup_active[ i ] = true;
+          pickup_life[ i ] = PICKUP_LIFE;
+          pickup_x[ i ] = x;
+          pickup_y[ i ] = y;
+          pickup_vx[ i ] = cos( a ) * 0.5;
+          pickup_vy[ i ] = sin( a ) * 0.5;
+          return;
+      }
+}
+
+int pickup_color( int type )
+{
+    if( type == PU_SPREAD ) return 0xFFFF90FF;     // pink
+    if( type == PU_RAPID )  return 0xFF60F0FF;     // yellow
+    return 0xFFFFE060;                             // cyan
+}
+
+void collect_pickup( int i )
+{
+    int type = pickup_type[ i ];
+    pickup_active[ i ] = false;
+
+    if( type == PU_SPREAD ) spread_timer = POWER_TIME;
+    else if( type == PU_RAPID ) rapid_timer = POWER_TIME;
+    else shield_energy = SHIELD_MAX;
+
+    sfx( SND_POWERUP, 0.7 );
+    spawn_ring( pickup_x[ i ], pickup_y[ i ], 40, 18, pickup_color( type ) );
+    add_flash( 0.15, pickup_color( type ) );
+}
+
+void update_pickups()
+{
+    int i;
+    float dx, dy;
+
+    for( i = 0; i < MAX_PICKUPS; i++ )
+      if( pickup_active[ i ] )
+      {
+          pickup_x[ i ] = wrap( pickup_x[ i ] + pickup_vx[ i ], screen_width );
+          pickup_y[ i ] = wrap( pickup_y[ i ] + pickup_vy[ i ], screen_height );
+          pickup_life[ i ]--;
+          if( pickup_life[ i ] <= 0 )
+          {
+              pickup_active[ i ] = false;
+              continue;
+          }
+
+          if( ship_alive && ship_hyperspace == 0 )
+          {
+              dx = pickup_x[ i ] - ship_x;
+              dy = pickup_y[ i ] - ship_y;
+              if( dx * dx + dy * dy < 20 * 20 ) collect_pickup( i );
+          }
+      }
+}
+
+// -----------------------------------------------------------------------------
 //   SCORING
 // -----------------------------------------------------------------------------
 
@@ -923,15 +1101,22 @@ void add_score( int points, float x, float y )
 void destroy_rock( int i, bool by_player )
 {
     int size = rock_size[ i ];
-    int k, child;
+    int k, child, pieces, points;
+    bool armored = rock_armored[ i ];
     float px = rock_x[ i ], py = rock_y[ i ];
     rock_active[ i ] = false;
 
     if( by_player )
     {
-        if( size == 3 ) add_score( 20, rock_x[ i ], rock_y[ i ] );
-        else if( size == 2 ) add_score( 50, rock_x[ i ], rock_y[ i ] );
-        else add_score( 100, rock_x[ i ], rock_y[ i ] );
+        // armored rocks are worth double
+        points = 100;
+        if( size == 3 ) points = 20;
+        else if( size == 2 ) points = 50;
+        if( armored ) points *= 2;
+        add_score( points, px, py );
+
+        // occasional power-up drop, bigger rocks more likely
+        if( grand() % 100 < 1 + size * 2 ) spawn_pickup( px, py );
     }
 
     explode( rock_x[ i ], rock_y[ i ], 4 + size * 3, 1.0 + size * 0.5, 3 + size * 2, ROCK_CORE );
@@ -954,13 +1139,35 @@ void destroy_rock( int i, bool by_player )
         add_shake( 1 );
     }
 
+    // from wave 3, large rocks break into three
+    pieces = 2;
+    if( size == 3 && level >= 3 ) pieces = 3;
+
     if( size > 1 )
-      for( k = 0; k < 2; k++ )
+      for( k = 0; k < pieces; k++ )
       {
-          // the two halves flash briefly as they break off
-          child = spawn_rock( px, py, size - 1, ( level - 1 ) * 0.08 );
+          // the pieces flash briefly as they break off
+          child = spawn_rock( px, py, size - 1, wave_speed_bonus() );
           if( child >= 0 ) rock_flash[ child ] = 8;
       }
+}
+
+// a player's shot hitting a rock: armor absorbs the first hit
+void hit_rock( int i, float push_x, float push_y )
+{
+    if( rock_hp[ i ] > 1 )
+    {
+        rock_hp[ i ]--;
+        rock_flash[ i ] = -10;       // negative: sparks where the armor cracked
+        rock_vx[ i ] += push_x * 0.04;
+        rock_vy[ i ] += push_y * 0.04;
+        explode( rock_x[ i ], rock_y[ i ], 6, 2.2, 3, 0xFFFFD0A0 );
+        sfx_pitched( SND_ARMOR, 0.7, frand_range( 0.9, 1.1 ) );
+        add_shake( 1.5 );
+        return;
+    }
+
+    destroy_rock( i, true );
 }
 
 void destroy_saucer( bool by_player )
@@ -969,6 +1176,7 @@ void destroy_saucer( bool by_player )
     {
         if( saucer_small ) add_score( 1000, saucer_x, saucer_y );
         else add_score( 200, saucer_x, saucer_y );
+        spawn_pickup( saucer_x, saucer_y );      // saucers always drop one
     }
 
     explode( saucer_x, saucer_y, 18, 2.6, 7, SAUCER_CORE );
@@ -985,7 +1193,11 @@ void kill_ship()
 
     ship_alive = false;
     ship_respawn_timer = 110;
+    shield_up = false;
+    spread_timer = 0;
+    rapid_timer = 0;
     set_thrust_sound( false );
+    set_shield_sound( false );
 
     // debris: the ship's own outline flying apart, plus sparks
     for( i = 0; i < 6; i++ )
@@ -1024,6 +1236,8 @@ void reset_ship()
     ship_alive = true;
     ship_invulnerable = 120;
     ship_hyperspace = 0;
+    shield_energy = SHIELD_MAX;
+    shield_up = false;
 }
 
 void start_wave()
@@ -1031,6 +1245,11 @@ void start_wave()
     spawn_wave_rocks( 3 + level );
     wave_frames = 0;
     wave_banner = 150;
+
+    wave_rule_text = "";
+    if( level == 3 ) wave_rule_text = "NEW - LARGE ROCKS SPLIT IN THREE";
+    if( level == 4 ) wave_rule_text = "NEW - ARMORED ROCKS TAKE TWO HITS";
+    if( level >= 4 ) wave_banner = 190;
     beat_timer = 60;
 }
 
@@ -1147,6 +1366,10 @@ void begin_game( int seed, bool demo )
     in_bits = 0;
     fire_frames = 0;
     hyper_frames = 0;
+    spread_timer = 0;
+    rapid_timer = 0;
+    clear_pickups();
+    set_shield_sound( false );
 
     score = 0;
     new_high_score = false;
@@ -1198,6 +1421,8 @@ void enter_title_page( int page )
     stop_all_channels();
     thrust_sound_on = false;
     saucer_sound_on = false;
+    shield_sound_on = false;
+    clear_pickups();
     set_global_volume( 0.85 );
     demo_mode = false;
     level = 1;
@@ -1225,6 +1450,7 @@ void finish_game()
 
     if( saucer_active ) remove_saucer();
     set_thrust_sound( false );
+    set_shield_sound( false );
 
     if( score > demo_score && rec_frames >= DEMO_MIN_FRAMES )
     {
@@ -1305,6 +1531,8 @@ void update_ship()
     if( hyper_frames == 1 )
     {
         ship_hyperspace = 40;
+        shield_up = false;
+        set_shield_sound( false );
         ship_thrusting = false;
         set_thrust_sound( false );
         spawn_ring( ship_x, ship_y, 30, 14, 0xFFFFC080 );
@@ -1347,20 +1575,30 @@ void update_ship()
     ship_x = wrap( ship_x + ship_vx, screen_width );
     ship_y = wrap( ship_y + ship_vy, screen_height );
 
-    // fire on press, auto-repeat while held
+    // fire on press, auto-repeat while held (faster with rapid fire)
     if( fire_cooldown > 0 ) fire_cooldown--;
     if( fire_frames == 1 || ( fire_frames > 0 && fire_cooldown == 0 ) )
     {
         fire_bullet();
         fire_cooldown = 10;
+        if( rapid_timer > 0 ) fire_cooldown = 4;
     }
+
+    if( spread_timer > 0 ) spread_timer--;
+    if( rapid_timer > 0 ) rapid_timer--;
+
+    // shield: up while held and there is energy left
+    shield_up = ( in_bits & IN_SHIELD ) != 0 && shield_energy > 0;
+    if( shield_up ) shield_energy -= 1;
+    else shield_energy = fmin( SHIELD_MAX, shield_energy + 0.35 );
+    set_shield_sound( shield_up );
 
     if( ship_invulnerable > 0 ) ship_invulnerable--;
 }
 
 bool ship_vulnerable()
 {
-    return ship_alive && ship_invulnerable == 0 && ship_hyperspace == 0;
+    return ship_alive && ship_invulnerable == 0 && ship_hyperspace == 0 && !shield_up;
 }
 
 // -----------------------------------------------------------------------------
@@ -1453,6 +1691,7 @@ void update_world()
           rock_y[ i ] = wrap( rock_y[ i ] + rock_vy[ i ], screen_height );
           rock_angle[ i ] += rock_spin[ i ];
           if( rock_flash[ i ] > 0 ) rock_flash[ i ]--;
+          if( rock_flash[ i ] < 0 ) rock_flash[ i ]++;
       }
 
     update_saucer();
@@ -1474,7 +1713,7 @@ void update_world()
                 if( dx * dx + dy * dy < r * r )
                 {
                     bullet_life[ b ] = 0;
-                    destroy_rock( i, true );
+                    hit_rock( i, bullet_vx[ b ], bullet_vy[ b ] );
                     break;
                 }
             }
@@ -1526,6 +1765,53 @@ void update_world()
                 }
             }
       }
+
+    // the shield smashes rocks, swallows shots and rams saucers,
+    // each costing energy
+    if( ship_alive && shield_up )
+    {
+        r = SHIELD_RADIUS;
+        for( i = 0; i < MAX_ROCKS; i++ )
+          if( rock_active[ i ] )
+          {
+              dx = ship_x - rock_x[ i ];
+              dy = ship_y - rock_y[ i ];
+              if( dx * dx + dy * dy < ( r + rock_radius( rock_size[ i ] ) ) * ( r + rock_radius( rock_size[ i ] ) ) )
+              {
+                  destroy_rock( i, true );
+                  shield_energy -= 20 + rock_size[ i ] * 15;
+                  spawn_ring( ship_x, ship_y, 34, 12, 0xFFFFE060 );
+              }
+          }
+
+        for( b = 0; b < MAX_ENEMY_SHOTS; b++ )
+          if( eshot_life[ b ] > 0 )
+          {
+              dx = eshot_x[ b ] - ship_x;
+              dy = eshot_y[ b ] - ship_y;
+              if( dx * dx + dy * dy < ( r + 3 ) * ( r + 3 ) )
+              {
+                  eshot_life[ b ] = 0;
+                  shield_energy -= 25;
+                  spawn_ring( ship_x, ship_y, 30, 10, 0xFFFFE060 );
+              }
+          }
+
+        if( saucer_active )
+        {
+            dx = saucer_x - ship_x;
+            dy = saucer_y - ship_y;
+            if( dx * dx + dy * dy < ( r + saucer_size() ) * ( r + saucer_size() ) )
+            {
+                destroy_saucer( true );
+                shield_energy -= 60;
+            }
+        }
+
+        if( shield_energy < 0 ) shield_energy = 0;
+    }
+
+    update_pickups();
 
     // ship vs rocks
     if( ship_vulnerable() )
@@ -1668,15 +1954,17 @@ void world_intensity( float f )
 
 void draw_stars()
 {
-    int i;
+    int i, g, bl;
     float b;
 
     vec_thickness( 1 );
     for( i = 0; i < STARS; i++ )
     {
         b = 0.55 + 0.45 * sin( anim * 0.03 + star_phase[ i ] );
-        vec_color( make_color_rgb( 50 + 50 * b, 50 + 50 * b, 80 + 60 * b ), 0 );
-        vec_line( star_x[ i ], star_y[ i ], star_x[ i ] + 1, star_y[ i ] );
+        g = 50 + 50 * b;
+        bl = 80 + 60 * b;
+        vec_color( 0xFF000000 | ( bl << 16 ) | ( g << 8 ) | g, 0 );
+        vec_line_polar( star_x[ i ], star_y[ i ], 1, 0 );
     }
 }
 
@@ -1721,6 +2009,7 @@ void draw_world()
 {
     int i;
     float c, s, len, fade, r;
+    int pc;
     bool ship_visible;
 
     // rocks (newly split ones flash white)
@@ -1729,13 +2018,47 @@ void draw_world()
     for( i = 0; i < MAX_ROCKS; i++ )
       if( rock_active[ i ] )
       {
+          r = rock_radius( rock_size[ i ] );
+
           if( rock_flash[ i ] > 0 ) vec_color( 0xFFFFFFFF, 0xFFC0A0B0 );
+          else if( rock_flash[ i ] < 0 ) vec_color( 0xFF80D0FF, 0xFF205080 );   // armor cracking
+          else if( rock_armored[ i ] ) vec_color( ARMOR_CORE, ARMOR_GLOW );
           else vec_color( ROCK_CORE, ROCK_GLOW );
 
-          r = rock_radius( rock_size[ i ] );
           vec_shape_wrapped( &rock_shape_x[ rock_shape[ i ] * ROCK_POINTS ],
                              &rock_shape_y[ rock_shape[ i ] * ROCK_POINTS ],
                              ROCK_POINTS, rock_x[ i ], rock_y[ i ], rock_angle[ i ], r, r * 1.1 );
+
+          // armor plating: an inner outline while it still holds,
+          // a few broken fragments of it after the first hit
+          if( rock_armored[ i ] && rock_flash[ i ] == 0 )
+          {
+              vec_thickness( 1.5 );
+              if( rock_hp[ i ] > 1 )
+                vec_shape( &rock_shape_x[ rock_shape[ i ] * ROCK_POINTS ],
+                           &rock_shape_y[ rock_shape[ i ] * ROCK_POINTS ],
+                           ROCK_POINTS, rock_x[ i ], rock_y[ i ], -rock_angle[ i ], r * 0.55 );
+              else
+                vec_arc( rock_x[ i ], rock_y[ i ], r * 0.45, rock_angle[ i ] * 2, rock_angle[ i ] * 2 + 2.2, 4 );
+              vec_thickness( 2 );
+          }
+      }
+
+    // power-ups: a spinning diamond around a letter, blinking as they expire
+    for( i = 0; i < MAX_PICKUPS; i++ )
+      if( pickup_active[ i ] && ( pickup_life[ i ] > 120 || ( anim / 5 ) % 2 == 0 ) )
+      {
+          pc = pickup_color( pickup_type[ i ] );
+          vec_thickness( 2 );
+          vec_glow_size( 18 );
+          vec_color( pc, vec_scale_rgb( pc, 0.45 ) );
+          vec_shape( pickup_shape_x, pickup_shape_y, 4, pickup_x[ i ], pickup_y[ i ], anim * 0.05, 13 );
+
+          vec_thickness( 1.5 );
+          vec_glow_size( 10 );
+          if( pickup_type[ i ] == PU_SPREAD ) vec_char( '3', pickup_x[ i ] - 2.5, pickup_y[ i ] - 5, 5 );
+          else if( pickup_type[ i ] == PU_RAPID ) vec_char( 'R', pickup_x[ i ] - 2.5, pickup_y[ i ] - 5, 5 );
+          else vec_char( 'E', pickup_x[ i ] - 2.5, pickup_y[ i ] - 5, 5 );
       }
 
     if( saucer_active ) draw_saucer();
@@ -1760,6 +2083,20 @@ void draw_world()
             vec_line( ship_x - c * 6 - s * 4, ship_y - s * 6 + c * 4, ship_x - c * len, ship_y - s * len );
             vec_line( ship_x - c * 6 + s * 4, ship_y - s * 6 - c * 4, ship_x - c * len, ship_y - s * len );
         }
+    }
+
+    // shield bubble: a pulsing double ring, flickering when nearly empty
+    if( ship_alive && shield_up && ( shield_energy > 60 || ( anim / 3 ) % 2 == 0 ) )
+    {
+        vec_thickness( 2 );
+        vec_glow_size( 20 );
+        vec_color( 0xFFFFE060, 0xFF806020 );
+        vec_circle( ship_x, ship_y, SHIELD_RADIUS + sin( anim * 0.3 ), 18 );
+        world_intensity( 0.45 );
+        vec_thickness( 1.5 );
+        vec_arc( ship_x, ship_y, SHIELD_RADIUS - 4, anim * 0.12, anim * 0.12 + 2.5, 6 );
+        vec_arc( ship_x, ship_y, SHIELD_RADIUS - 4, anim * 0.12 + 3.14, anim * 0.12 + 5.64, 6 );
+        world_intensity( 1 );
     }
 
     // player bullets as tracers
@@ -1787,12 +2124,13 @@ void draw_world()
     // shockwave rings: grow and fade
     vec_thickness( 1.5 );
     vec_glow_size( 14 );
+    // (fades are applied to each color directly: changing the global
+    // intensity per item is much slower)
     for( i = 0; i < MAX_RINGS; i++ )
       if( ring_life[ i ] > 0 )
       {
-          fade = ring_life[ i ] / ( ring_max_life[ i ] * 1.0 );
-          world_intensity( fade * 0.8 );
-          vec_color( ring_color[ i ], vec_scale_rgb( ring_color[ i ], 0.35 ) );
+          fade = ring_life[ i ] / ( ring_max_life[ i ] * 1.0 ) * 0.8;
+          vec_color( vec_scale_alpha( ring_color[ i ], fade ), vec_scale_rgb( ring_color[ i ], 0.35 * fade ) );
           vec_circle( ring_x[ i ], ring_y[ i ], ring_radius[ i ] * ( 1.0 - fade * fade ), 14 );
       }
     world_intensity( 1 );
@@ -1804,8 +2142,7 @@ void draw_world()
       if( part_life[ i ] > 0 )
       {
           fade = part_life[ i ] / ( part_max_life[ i ] * 1.0 );
-          world_intensity( fade );
-          vec_color( part_color[ i ], vec_scale_rgb( part_color[ i ], 0.4 ) );
+          vec_color( vec_scale_alpha( part_color[ i ], fade ), vec_scale_rgb( part_color[ i ], 0.4 * fade ) );
           c = cos( part_angle[ i ] ) * part_length[ i ] * 0.5;
           s = sin( part_angle[ i ] ) * part_length[ i ] * 0.5;
           vec_line( part_x[ i ] - c, part_y[ i ] - s, part_x[ i ] + c, part_y[ i ] + s );
@@ -1818,8 +2155,8 @@ void draw_world()
     for( i = 0; i < MAX_POPUPS; i++ )
       if( popup_life[ i ] > 0 )
       {
-          world_intensity( popup_life[ i ] / 50.0 );
-          vec_color( 0xFFA0F0FF, 0xFF305060 );
+          fade = popup_life[ i ] / 50.0;
+          vec_color( vec_scale_alpha( 0xFFA0F0FF, fade ), vec_scale_rgb( 0xFF305060, fade ) );
           vec_number( popup_value[ i ], popup_x[ i ] - 8, popup_y[ i ], 4 );
       }
     world_intensity( 1 );
@@ -1840,6 +2177,34 @@ void draw_hud()
     for( i = 0; i < lives && i < 8; i++ )
       vec_shape( ship_model_x, ship_model_y, 4, 24 + i * 22, 52, -1.5707963, 0.8 );
 
+    // shield energy meter under the lives
+    vec_thickness( 1 );
+    vec_color( 0xFF806040, 0 );
+    vec_line( 16, 68, 96, 68 );
+    vec_line( 16, 74, 96, 74 );
+    vec_thickness( 4 );
+    vec_glow_size( 10 );
+    if( shield_energy < SHIELD_MAX * 0.25 ) vec_color( 0xFF6060FF, 0xFF202080 );
+    else vec_color( 0xFFFFE060, 0xFF806020 );
+    if( shield_energy > 1 ) vec_line( 16, 71, 16 + 80 * shield_energy / SHIELD_MAX, 71 );
+
+    // active power-ups: a letter and a shrinking bar each
+    vec_thickness( 1.5 );
+    w = 84;
+    if( spread_timer > 0 )
+    {
+        vec_color( pickup_color( PU_SPREAD ), vec_scale_rgb( pickup_color( PU_SPREAD ), 0.4 ) );
+        vec_char( '3', 16, w, 4 );
+        vec_line( 26, w + 4, 26 + 50 * spread_timer / POWER_TIME, w + 4 );
+        w += 14;
+    }
+    if( rapid_timer > 0 )
+    {
+        vec_color( pickup_color( PU_RAPID ), vec_scale_rgb( pickup_color( PU_RAPID ), 0.4 ) );
+        vec_char( 'R', 16, w, 4 );
+        vec_line( 26, w + 4, 26 + 50 * rapid_timer / POWER_TIME, w + 4 );
+    }
+
     vec_thickness( 1.5 );
     vec_color( DIM_TEXT, 0 );
     vec_text( "HI", 284, 14, 5 );
@@ -1858,6 +2223,14 @@ void draw_hud()
         else w = 320 - vec_text_width( "WAVE 00", 12 ) / 2;
         vec_text( "WAVE", w, 120, 12 );
         vec_number( level, w + vec_text_width( "WAVE ", 12 ), 120, 12 );
+
+        if( wave_rule_text[ 0 ] )
+        {
+            vec_thickness( 1.5 );
+            vec_glow_size( 12 );
+            vec_color( 0xFFFFB090, 0xFF603020 );
+            vec_text_centered( wave_rule_text, 320, 158, 5 );
+        }
         vec_intensity( 1 );
     }
 
@@ -1915,7 +2288,7 @@ void draw_title()
     vec_thickness( 1.5 );
     vec_glow_size( 10 );
     vec_color( DIM_TEXT, 0 );
-    vec_text_centered( "B FIRE   A THRUST   X HYPERSPACE", 320, 262, 5 );
+    vec_text_centered( "B FIRE   A THRUST   X HYPERSPACE   Y SHIELD", 320, 262, 5 );
     vec_text_centered( "START PAUSE", 320, 284, 5 );
 
     vec_color( 0xFFFFE0A0, 0xFF403010 );

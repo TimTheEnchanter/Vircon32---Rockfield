@@ -178,6 +178,26 @@ def pause():
     return notes([880, 660], 0.06, "square", 0.3, 0.8)
 
 
+def shield():
+    # loopable hum: two detuned tones with a slow shimmer, whole periods
+    t = t_axis(0.5)
+    s = np.sin(2 * np.pi * 220 * t) + 0.6 * np.sin(2 * np.pi * 226 * t)
+    s += 0.25 * np.sin(2 * np.pi * 660 * t) * (0.5 + 0.5 * np.sin(2 * np.pi * 8 * t))
+    return normalize(s, 0.3)
+
+
+def powerup():
+    return notes([523, 784, 1047, 1319, 1568], 0.055, "tri", 0.45, 0.4)
+
+
+def armor():
+    # short metallic clank: inharmonic partials with a fast decay
+    t = t_axis(0.22)
+    s = sum(np.sin(2 * np.pi * f * t) * w for f, w in [(820, 1.0), (1370, 0.7), (2210, 0.5), (3050, 0.3)])
+    s += rng.uniform(-1, 1, len(t)) * np.exp(-t * 90) * 0.8
+    return normalize(s * np.exp(-t * 22), 0.5)
+
+
 SOUNDS = [
     ("fire", fire),
     ("bang_large", bang_large),
@@ -195,6 +215,9 @@ SOUNDS = [
     ("start_game", start_game),
     ("wave_clear", wave_clear),
     ("pause", pause),
+    ("shield", shield),
+    ("powerup", powerup),
+    ("armor", armor),
 ]
 
 
